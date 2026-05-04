@@ -222,3 +222,4 @@ outputs/*
 
 #dataset
 *.bag
+!outputs/.gitkeep
