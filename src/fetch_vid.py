@@ -147,25 +147,6 @@ def export_csv_data(bag_path: Path) -> None:
     motor = load_motor_data(bag_path)
     pose = load_body_pose(bag_path)
 
-    # ── DEBUG ────────────────────────────────────────────────────────
-    for timestamp, msg in read_topic("/m100withm3508/m3508_m1", bag_path):
-        if msg.rpm != 0:
-            print(f"First non-zero RPM at t={timestamp * 1e-9:.3f}: rpm={msg.rpm}")
-            break
-    else:
-        print("All RPM values are zero!")
-    return
-
-    # # ── DEBUG ────────────────────────────────────────────────────────
-    # print(motor.head(20))
-    # print("motor time range:", motor['timestamp_s'].min(), "→", motor['timestamp_s'].max())
-
-    # camera_timestamps_ns = sorted(set(t for t, _ in iter_left_images(bag_path)))
-    # camera_timestamps_s = np.array(camera_timestamps_ns) * 1e-9
-    # print("camera time range:", camera_timestamps_s.min(), "→", camera_timestamps_s.max())
-    # return  # stop here for now
-    # # ─────────────────────────────────────────────────────────────────
-
     aligned_pose, aligned_motor_melt = preprocessing(motor, pose, bag_path)
 
     motor_path = OUTPUT_DIR / "motor_data.csv"
