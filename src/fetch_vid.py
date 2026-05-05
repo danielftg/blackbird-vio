@@ -25,8 +25,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pandas as pd
-from scipy.interpolate import interp1d
+# from scipy.interpolate import interp1d
+from scipy.interpolate import make_interp_spline
 from scipy.spatial.transform import Rotation, Slerp
+from rosbags.typesys import get_typestore
 
 
 from modules.bag_loader import (
@@ -36,6 +38,7 @@ from modules.bag_loader import (
     load_motor_data,
     iter_left_images,
     iter_right_images,
+    read_topic,
 )
 
 
@@ -47,95 +50,85 @@ IMAGE_DIR = OUTPUT_DIR / "images"
 
 # Use None to automatically find the bag inside ./bags.
 # If you have several bag files, set this explicitly, for example:
-# BAG_PATH = BAGS_DIR / "indoor_loadless_hovor_3096.1g_79.04s.bag"
-BAG_PATH = None
+BAG_PATH = BAGS_DIR / "indoor_loadless_hovor_3096.1g_79.04s.bag"
+# BAG_PATH = "blackbird/blackbird-vio/src/bags/indoor_loadless_hovor_3096.1g_79.04s.bag"
 
 # Set this to None to export all images.
 # Keep it small while testing so you do not write thousands of images by accident.
 MAX_IMAGES_PER_CAMERA = 20
 
-def interpolate_to_camera_times(data_times, data_values, cols, camera_times_s):
-    funcs = [interp1d(data_times, data_values[:, i], kind='linear',
-                      bounds_error=False, fill_value='extrapolate')
-             for i in range(len(cols))]
-    arr = np.column_stack([f(camera_times_s) for f in funcs])
+def interpolate_to_camera_times(
+    data_times: np.ndarray,
+    data_values: np.ndarray,
+    cols: list[str],
+    camera_times_s: np.ndarray,
+) -> pd.DataFrame:
+    arr = np.column_stack([
+        np.interp(camera_times_s, data_times, data_values[:, i])
+        for i in range(len(cols))
+    ])
     return pd.DataFrame(arr, columns=cols)
 
-def preprocessing(motor, pose, bag_path) -> tuple[pd.DataFrame, pd.DataFrame]:
+def preprocessing(
+    motor: pd.DataFrame,
+    pose: pd.DataFrame,
+    bag_path: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Convert each rosbag into time-aligned arrays at the camera frame times
-    $t_0, t_1, \ldots, t_N$:
-    
-- Stereo images $(I^L_k, I^R_k)$ — algorithm input
-- Per-rotor thrusts $\mathbf{u}_{k-1} = (T_1, T_2, T_3, T_4)$ — algorithm input
-- Pose $S_k$ + body-frame velocities — for evaluation
-        
+    t_0, t_1, ..., t_N:
+
+    - Stereo images (I^L_k, I^R_k)                         — algorithm input
+    - Per-rotor thrusts u_{k-1} = (T1, T2, T3, T4)         — algorithm input
+    - Pose S_k + body-frame velocities                      — for evaluation
     """
-    # Get camera timestamps (assuming left and right are synchronized)
+    # ── Camera timeline ───────────────────────────────────────────────────────
     camera_timestamps_ns = sorted(set(t for t, _ in iter_left_images(bag_path)))
-    camera_timestamps_s = [t * 1e-9 for t in camera_timestamps_ns]
-    
-    # Align pose data to camera timestamps
+    camera_timestamps_s  = np.array(camera_timestamps_ns) * 1e-9
+
+    # ── Pose: position via linear interp, rotation via SLERP ─────────────────
     pose_times = pose['timestamp_s'].values
-    pose_cols = ['x', 'y', 'z', 'qx', 'qy', 'qz', 'qw']
-    pose_data = pose[pose_cols].values
-    
-    # Create interpolation functions for each pose component
-    # interp_funcs_pose = [
-    #     interp1d(pose_times, pose_data[:, i], kind='linear', bounds_error=False, fill_value='extrapolate')
-    #     for i in range(len(pose_cols))
-    # ]
 
-    rotations = Rotation.from_quat(pose[['qx','qy','qz','qw']].values)
-    slerp = Slerp(pose_times, rotations)
-    interp_funcs_pose = slerp(camera_timestamps_s)
-    
-    # Interpolate pose to camera timestamps
-    aligned_pose_data = np.array([[f(t) for f in interp_funcs_pose] for t in camera_timestamps_s])
-    aligned_pose = pd.DataFrame(aligned_pose_data, columns=pose_cols)
-    aligned_pose['timestamp_ns'] = camera_timestamps_ns
-    aligned_pose['timestamp_s'] = camera_timestamps_s
-    aligned_pose = aligned_pose[['timestamp_ns', 'timestamp_s'] + pose_cols]
-    
-    # Align motor data to camera timestamps
-    # Pivot motor data to have one row per timestamp with columns for each motor's rpm
-    motor_pivot = motor.pivot(index='timestamp_s', columns='motor', values='rpm').reset_index()
-    motor_times = motor_pivot['timestamp_s'].values
-    motor_cols = ['m1', 'm2', 'm3', 'm4']
-    motor_data = motor_pivot[motor_cols].values
-    
-    # Create interpolation functions for each motor's rpm
-    interp_funcs_motor = [
-        interp1d(motor_times, motor_data[:, i], kind='linear', bounds_error=False, fill_value='extrapolate')
-        for i in range(len(motor_cols))
-    ]
-    
-    # Interpolate motor data to camera timestamps
-    aligned_motor_data = np.array([[f(t) for f in interp_funcs_motor] for t in camera_timestamps_s])
-
-    # After interpolation, shift by one (u_{k-1})
-    aligned_motor_data = aligned_motor_data[:-1]   # drop last
-
-    aligned_motor = pd.DataFrame(aligned_motor_data, columns=motor_cols)
-    aligned_motor['timestamp_ns'] = camera_timestamps_ns
-    aligned_motor['timestamp_s'] = camera_timestamps_s
-    
-    # Melt back to original motor format for compatibility
-    aligned_motor_melt = aligned_motor.melt(
-        id_vars=['timestamp_ns', 'timestamp_s'], 
-        value_vars=motor_cols, 
-        var_name='motor', 
-        value_name='rpm'
+    # x, y, z — standard linear interpolation
+    aligned_pos = interpolate_to_camera_times(
+        pose_times,
+        pose[['x', 'y', 'z']].values,
+        ['x', 'y', 'z'],
+        camera_timestamps_s,
     )
-    aligned_motor_melt['id'] = 0  # Dummy value
-    aligned_motor_melt['current'] = 0.0  # Dummy value
-    aligned_motor_melt = aligned_motor_melt[['timestamp_ns', 'timestamp_s', 'motor', 'id', 'current', 'rpm']]
-    aligned_motor_melt = aligned_motor_melt.sort_values(['timestamp_ns', 'motor']).reset_index(drop=True)
-    
-    # Update the original DataFrames in place
-    pose[:] = aligned_pose
-    motor[:] = aligned_motor_melt
 
-    return aligned_pose, aligned_motor_melt
+    # qx, qy, qz, qw — SLERP to preserve unit-quaternion constraint
+    slerp = Slerp(pose_times, Rotation.from_quat(pose[['qx', 'qy', 'qz', 'qw']].values))
+    interp_quats = slerp(camera_timestamps_s).as_quat()   # (N, 4) array: x y z w
+    aligned_rot = pd.DataFrame(interp_quats, columns=['qx', 'qy', 'qz', 'qw'])
+
+    aligned_pose = pd.concat([aligned_pos, aligned_rot], axis=1)
+    aligned_pose.insert(0, 'timestamp_s',  camera_timestamps_s)
+    aligned_pose.insert(0, 'timestamp_ns', camera_timestamps_ns)
+
+    # ── Motor: interpolate then apply u_{k-1} lag ─────────────────────────────
+    # Pivot to wide format: one row per timestamp, one column per motor
+
+    motor_cols  = ['m1', 'm2', 'm3', 'm4']
+
+    motor_pivot = motor.pivot(index='timestamp_s', columns='motor', values='rpm')
+    motor_pivot = motor_pivot.ffill().bfill()  # fill gaps per motor column
+    motor_pivot = motor_pivot.reset_index()
+
+    aligned_motor = interpolate_to_camera_times(
+        motor_pivot['timestamp_s'].values,
+        motor_pivot[motor_cols].values,
+        motor_cols,
+        camera_timestamps_s,
+    )
+    aligned_motor.insert(0, 'timestamp_s',  camera_timestamps_s)
+    aligned_motor.insert(0, 'timestamp_ns', camera_timestamps_ns)
+
+    # u_{k-1}: motor command at step k-1 pairs with camera frame at step k.
+    # Drop the first camera frame (no prior motor command) and the last motor row.
+    aligned_motor = aligned_motor.iloc[:-1].reset_index(drop=True)   # u_0 … u_{N-1}
+    aligned_pose  = aligned_pose.iloc[1:].reset_index(drop=True)     # S_1 … S_N
+
+    return aligned_pose, aligned_motor
 
 def save_image(path: Path, image) -> None:
     """Save one image array to disk."""
@@ -154,13 +147,32 @@ def export_csv_data(bag_path: Path) -> None:
     motor = load_motor_data(bag_path)
     pose = load_body_pose(bag_path)
 
+    # ── DEBUG ────────────────────────────────────────────────────────
+    for timestamp, msg in read_topic("/m100withm3508/m3508_m1", bag_path):
+        if msg.rpm != 0:
+            print(f"First non-zero RPM at t={timestamp * 1e-9:.3f}: rpm={msg.rpm}")
+            break
+    else:
+        print("All RPM values are zero!")
+    return
+
+    # # ── DEBUG ────────────────────────────────────────────────────────
+    # print(motor.head(20))
+    # print("motor time range:", motor['timestamp_s'].min(), "→", motor['timestamp_s'].max())
+
+    # camera_timestamps_ns = sorted(set(t for t, _ in iter_left_images(bag_path)))
+    # camera_timestamps_s = np.array(camera_timestamps_ns) * 1e-9
+    # print("camera time range:", camera_timestamps_s.min(), "→", camera_timestamps_s.max())
+    # return  # stop here for now
+    # # ─────────────────────────────────────────────────────────────────
+
     aligned_pose, aligned_motor_melt = preprocessing(motor, pose, bag_path)
 
     motor_path = OUTPUT_DIR / "motor_data.csv"
     pose_path = OUTPUT_DIR / "body_pose.csv"
 
-    aligned_pose.to_csv(motor_path, index=False)
-    aligned_motor_melt.to_csv(pose_path, index=False)
+    aligned_motor_melt.to_csv(motor_path, index=False)
+    aligned_pose.to_csv(pose_path, index=False)
 
     print(f"Saved {motor_path}")
     print(f"Saved {pose_path}")
