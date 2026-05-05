@@ -1,0 +1,65 @@
+# =============================================================================
+# Algorithm parameters.
+# No values dependent on physical reality. Those go into calibration.
+# =============================================================================
+
+signif:                                # significance levels (∈ (0, 1))
+  alpha_NIS:  0.99                     # NIS gate (§4.2). χ² test on Mahalanobis
+                                       # distance of measurement residuals.
+                                       # 0.99 = reject 1% of inliers.
+  alpha_adm:  0.95                     # Admission test (§4.3). Test for adding
+                                       # new features to the EKF state. More
+                                       # permissive than the NIS gate.
+  alpha_sr:   0.997                    # Search region (§3.8.3). 3σ bound on
+                                       # predicted feature location.
+
+cv:                                    # computer vision parameters
+  # ---- feature counts ---------------------------------------------------
+  N_F_max:        300                  # max features tracked simultaneously
+  N_F_min:        100                  # min features before triggering
+                                       # re-detection
+  N_I_max:        2000                 # max interest points evaluated per
+                                       # frame (before allocation/pruning)
+  N_feat_gl:      80                   # global feature target across image
+  N_feat_lo:      6                    # local feature target per grid cell
+
+  # ---- detection --------------------------------------------------------
+  tau_min:        1.0e-3               # min Shi-Tomasi cornerness (relative;
+                                       # absolute threshold = tau_min · max
+                                       # eigenvalue in image)
+  grid_cells:     [8, 6]               # detection grid [W, H] cells; for
+                                       # spatially-distributed feature
+                                       # selection on 640x480 → 80x80 px cells
+
+  # ---- tracking ---------------------------------------------------------
+  fb_check:       1.5                  # ε_fb forward-backward check threshold
+                                       # [px]. Reject KLT tracks whose
+                                       # round-trip pixel error exceeds this.
+  klt_window:     21                   # KLT integration window size [px]
+  klt_pyramid:    3                    # KLT pyramid levels
+  n_max:          200                  # max point lifetime [frames]
+                                       # (~3.3 s at 60 Hz)
+
+  # ---- stereo matching --------------------------------------------------
+  disp_min:       1.0                  # min disparity [px]. Avoid div-by-zero
+                                       # at infinity; enforces Z_max constraint
+  disp_max:       128                  # max disparity [px]. Enforces Z_min
+                                       # constraint at b·fx/disp_max
+  stereo_subpix:  true                 # parabolic sub-pixel disparity refinement
+
+  # ---- search region (§3.8.3) ------------------------------------------
+  Z_min:          0.3                  # [m] min predicted depth (RealSense
+                                       # short-range floor)
+  Z_max:          20.0                 # [m] max predicted depth (indoor scene
+                                       # bound; refine for outdoor sequences)
+  v_max:          5.0                  # [m/s] max body-frame velocity assumed
+                                       # for inter-frame prediction
+  a_max:          15.0                 # [m/s²] max body-frame acceleration
+                                       # assumed for inter-frame prediction
+
+solver:                                # stage-2 nonlinear solver (Gauss-Newton)
+  max_iters:      10                   # max GN iterations per frame
+  rel_tol:        1.0e-5               # relative cost decrease termination
+  abs_tol:        1.0e-7               # absolute cost termination
+  huber_delta:    1.5                  # Huber robust kernel threshold [px]
+                                       # (set to 0 to disable robustification)
