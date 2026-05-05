@@ -1,4 +1,5 @@
-"""Functions for reading the drone ROS bag stored in the ./bags folder.
+"""
+Functions for reading the drone ROS bag stored in the ./bags folder.
 
 This file is intended to be placed in the root of your repository:
 
@@ -6,11 +7,7 @@ This file is intended to be placed in the root of your repository:
         bags/
             your_bag_file.bag
         bag_loader.py
-        example_export.py
-
-Install dependencies:
-
-    pip install rosbags numpy pandas opencv-python
+        fetch_vid.py
 
 Notes:
 - The image topics are loaded lazily with generator functions so you do not

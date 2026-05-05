@@ -24,7 +24,7 @@ from pathlib import Path
 
 import cv2
 
-from bag_loader import (
+from modules.bag_loader import (
     get_bag_path,
     list_topics,
     load_body_pose,

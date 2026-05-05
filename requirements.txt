@@ -1,0 +1,12 @@
+apsw==3.53.0.0
+lz4==4.4.5
+numpy==2.4.4
+opencv-python==4.13.0.92
+pandas==3.0.2
+python-dateutil==2.9.0.post0
+rosbags==0.11.1
+ruamel.yaml==0.19.1
+six==1.17.0
+typing_extensions==4.15.0
+tzdata==2026.2
+zstandard==0.25.0
