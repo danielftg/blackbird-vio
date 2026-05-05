@@ -252,7 +252,7 @@ $RECYCLE.BIN/
 .streamlit/secrets.toml
 
 # Ignore outputs completely
-outputs/
+output/
 
 # Ignore everything in bags
 bags/*
