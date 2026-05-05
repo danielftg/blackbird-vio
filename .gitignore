@@ -248,5 +248,16 @@ $RECYCLE.BIN/
 *.lnk
 
 # End of https://www.toptal.com/developers/gitignore/api/python,macos,windows,linux
+# Streamlit
+.streamlit/secrets.toml
 
-*/bags/*
+# outputs
+outputs/*
+!outputs/.gitkeep
+
+# Ignore dataset files, but keep the empty bags folder
+bags/**
+!bags/
+!bags/.gitkeep
+
+*.bag
