@@ -209,3 +209,21 @@ class Ekf:
         feature info enters the solver via the pose prior).
         """
         ...
+
+    def relative_pose(T_a: jaxlie.SE3, T_b: jaxlie.SE3,
+                  P_joint: jnp.ndarray
+                  ) -> tuple[jaxlie.SE3, jnp.ndarray]:
+        """Relative pose Δ = T_b T_a⁻¹ and its 6x6 covariance.
+
+        Args:
+            T_a, T_b : SE(3) endpoints (e.g. T̂_{k-1}^+ and T̂_k^-, or both ^+).
+            P_joint  : 12x12 joint covariance over (δξ_a, δξ_b) — block (183)
+                    pre-update or block (187) post-update.
+
+        Returns:
+            (ΔT, Σ_Δξ) where Σ_Δξ = J P_joint Jᵀ with
+                J = [-Ad_{ΔT}, I_6]
+            the 6x12 Jacobian of the right-perturbation tangent of ΔT
+            w.r.t. (δξ_a, δξ_b).
+        """
+        ...
