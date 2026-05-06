@@ -25,10 +25,16 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pandas as pd
+import yaml
 # from scipy.interpolate import interp1d
 from scipy.interpolate import make_interp_spline
 from scipy.spatial.transform import Rotation, Slerp
 from rosbags.typesys import get_typestore
+import jax.numpy as jnp
+import jaxlie
+from scipy.signal import savgol_filter
+from rosbags.highlevel import AnyReader
+
 
 
 from modules.bag_loader import (
@@ -86,37 +92,102 @@ def preprocessing(
     camera_timestamps_s  = np.array(camera_timestamps_ns) * 1e-9
 
     # ── Pose: position via linear interp, rotation via SLERP ─────────────────
+    # 3a+3b: build T_W_B for each vicon sample
+    R_M_B = jaxlie.SO3.from_matrix(jnp.diag(jnp.array([1.0, -1.0, -1.0])))
+    T_M_B = jaxlie.SE3.from_rotation_and_translation(R_M_B, jnp.zeros(3))
+
+    T_W_B_list = []
+    for _, row in pose.iterrows():
+        R = jaxlie.SO3.from_quaternion_xyzw(jnp.array([row.qx, row.qy, row.qz, row.qw]))
+        T_W_M = jaxlie.SE3.from_rotation_and_translation(R, jnp.array([row.x, row.y, row.z]))
+        T_W_B_list.append(T_W_M @ T_M_B)
+
+    # 3c: re-reference to initial frame
+    T_W_B_0 = T_W_B_list[0]
+    S_vicon = [T_W_B_k.inverse() @ T_W_B_0 for T_W_B_k in T_W_B_list]
     pose_times = pose['timestamp_s'].values
 
-    # x, y, z — standard linear interpolation
-    aligned_pos = interpolate_to_camera_times(
-        pose_times,
-        pose[['x', 'y', 'z']].values,
-        ['x', 'y', 'z'],
-        camera_timestamps_s,
+    # 3d: interpolate on SE(3) at camera timestamps
+    S_list = []
+    for t_k in camera_timestamps_s:
+        idx = np.searchsorted(pose_times, t_k)
+        idx = np.clip(idx, 1, len(pose_times) - 1)
+        t_l, t_s = pose_times[idx - 1], pose_times[idx]
+        S_l, S_s = S_vicon[idx - 1], S_vicon[idx]
+        alpha = (t_k - t_l) / (t_s - t_l)
+        xi = (S_s @ S_l.inverse()).log()
+        S_list.append(jaxlie.SE3.exp(alpha * xi) @ S_l)
+
+    # 3e: differentiate to get body-frame velocities
+    dt = np.diff(camera_timestamps_s)
+    xi_raw = np.stack([
+        (S_list[k+1] @ S_list[k].inverse()).log() / dt[k]
+        for k in range(len(S_list) - 1)
+    ])
+    xi_smooth = savgol_filter(xi_raw, window_length=11, polyorder=3, axis=0)
+    v_B     = xi_smooth[:, :3]
+    omega_B = xi_smooth[:, 3:]
+
+    # pose_times = pose['timestamp_s'].values
+
+    # # x, y, z — standard linear interpolation
+    # aligned_pos = interpolate_to_camera_times(
+    #     pose_times,
+    #     pose[['x', 'y', 'z']].values,
+    #     ['x', 'y', 'z'],
+    #     camera_timestamps_s,
+    # )
+
+    # # qx, qy, qz, qw — SLERP to preserve unit-quaternion constraint
+    # slerp = Slerp(pose_times, Rotation.from_quat(pose[['qx', 'qy', 'qz', 'qw']].values))
+    # interp_quats = slerp(camera_timestamps_s).as_quat()   # (N, 4) array: x y z w
+    # aligned_rot = pd.DataFrame(interp_quats, columns=['qx', 'qy', 'qz', 'qw'])
+
+    # aligned_pose = pd.concat([aligned_pos, aligned_rot], axis=1)
+    # aligned_pose.insert(0, 'timestamp_s',  camera_timestamps_s)
+    # aligned_pose.insert(0, 'timestamp_ns', camera_timestamps_ns)
+
+    # Build aligned_pose from SE(3) results
+    # S_list has N entries, v_B/omega_B have N-1 entries
+    # Drop first S to align with velocities (matches the u_{k-1} convention too)
+    translations = np.stack([s.translation() for s in S_list[1:]])
+    quaternions  = np.stack([s.rotation().as_quaternion_xyzw() for s in S_list[1:]])
+
+    aligned_pose = pd.DataFrame(
+        np.hstack([translations, quaternions, v_B, omega_B]),
+        columns=['x', 'y', 'z', 'qx', 'qy', 'qz', 'qw', 'vx', 'vy', 'vz', 'wx', 'wy', 'wz']
     )
-
-    # qx, qy, qz, qw — SLERP to preserve unit-quaternion constraint
-    slerp = Slerp(pose_times, Rotation.from_quat(pose[['qx', 'qy', 'qz', 'qw']].values))
-    interp_quats = slerp(camera_timestamps_s).as_quat()   # (N, 4) array: x y z w
-    aligned_rot = pd.DataFrame(interp_quats, columns=['qx', 'qy', 'qz', 'qw'])
-
-    aligned_pose = pd.concat([aligned_pos, aligned_rot], axis=1)
-    aligned_pose.insert(0, 'timestamp_s',  camera_timestamps_s)
-    aligned_pose.insert(0, 'timestamp_ns', camera_timestamps_ns)
+    aligned_pose.insert(0, 'timestamp_s',  camera_timestamps_s[1:])
+    aligned_pose.insert(0, 'timestamp_ns', camera_timestamps_ns[1:])
 
     # ── Motor: interpolate then apply u_{k-1} lag ─────────────────────────────
     # Pivot to wide format: one row per timestamp, one column per motor
 
-    motor_cols  = ['m1', 'm2', 'm3', 'm4']
+    with open ("calibration.yaml", "r") as file:
+        data = yaml.safe_load(file)
+    rpm_thr_coeff = [
+    data['rotor_1']['rpm_thr_coeff'],  # m1
+    data['rotor_4']['rpm_thr_coeff'],  # m4 → rotor 2
+    data['rotor_3']['rpm_thr_coeff'],  # m3 → rotor 3
+    data['rotor_2']['rpm_thr_coeff'],  # m2 → rotor 4
+    ]
+
+
+    motor_cols  = ['m1', 'm4', 'm3', 'm2']
 
     motor_pivot = motor.pivot(index='timestamp_s', columns='motor', values='rpm')
     motor_pivot = motor_pivot.ffill().bfill()  # fill gaps per motor column
     motor_pivot = motor_pivot.reset_index()
 
+    valid_rpm_min, valid_rpm_max = 0, 7000  # adjust motor spec
+
+    motor_pivot[motor_cols] = motor_pivot[motor_cols].clip(
+        lower=valid_rpm_min, upper=valid_rpm_max
+    )
+
     aligned_motor = interpolate_to_camera_times(
         motor_pivot['timestamp_s'].values,
-        motor_pivot[motor_cols].values,
+        np.array(rpm_thr_coeff) * np.array(motor_pivot[motor_cols].values)**2,
         motor_cols,
         camera_timestamps_s,
     )
@@ -126,7 +197,7 @@ def preprocessing(
     # u_{k-1}: motor command at step k-1 pairs with camera frame at step k.
     # Drop the first camera frame (no prior motor command) and the last motor row.
     aligned_motor = aligned_motor.iloc[:-1].reset_index(drop=True)   # u_0 … u_{N-1}
-    aligned_pose  = aligned_pose.iloc[1:].reset_index(drop=True)     # S_1 … S_N
+    # aligned_pose  = aligned_pose.iloc[1:].reset_index(drop=True)     # S_1 … S_N
 
     return aligned_pose, aligned_motor
 
