@@ -177,7 +177,6 @@ def preprocessing(
     # u_{k-1}: motor command at step k-1 pairs with camera frame at step k.
     # Drop the first camera frame (no prior motor command) and the last motor row.
     aligned_motor = aligned_motor.iloc[:-1].reset_index(drop=True)   # u_0 … u_{N-1}
-    # aligned_pose  = aligned_pose.iloc[1:].reset_index(drop=True)     # S_1 … S_N
 
     return aligned_pose, aligned_motor
 
