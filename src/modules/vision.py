@@ -153,6 +153,12 @@ def predict_pixel(delta_T: jaxlie.SE3,
     """
     ...
 
+def predict_pixel_feature(p_Bk: np.ndarray, calib: dict, camera: str
+                          ) -> np.ndarray:
+    """Project an EKF feature point already expressed in B_k into camera
+    `camera` ∈ {"L", "R"}.
+    """
+    ...
 
 @dataclass
 class CandidateSample:

@@ -88,7 +88,7 @@ def preprocessing(
     - Pose S_k + body-frame velocities                      — for evaluation
     """
     
-    with open ("calibration.yaml", "r", encoding="utf-8") as file:
+    with open ("modules/constants/calibration.yaml", "r", encoding="utf-8") as file:
         data = yaml.safe_load(file)
 
     # ── Camera timeline ───────────────────────────────────────────────────────
