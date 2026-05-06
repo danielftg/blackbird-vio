@@ -8,6 +8,17 @@
 # =============================================================================
 # Notation: CoG - Geometric Centre, CoM - Center of Mass. Since CoM is not reported we use CoM ≈ CoG. 
 
+vicon_params:
+  # Offset between Vicon marker frame M and body frame B.
+  # Constant SE(3); not reported in [P] or [VD].
+  body_to_marker:
+    rotation:                          # R_MB (rotates B-frame vectors into M)
+                                       # FRD → FLU: x→x, y→-y, z→-z
+      - [1.0,  0.0,  0.0]
+      - [0.0, -1.0,  0.0]
+      - [0.0,  0.0, -1.0]
+    translation: [0.0, 0.0, 0.0]       # [m] t_MB, body origin in M
+
 drone_parameters:                      # X-config quadcopter
   drag_coeff: 1.2                      # [N·s/m] [EST]              
   arm_length: 0.325                    # [m] CoG → rotor; = wheelbase/2

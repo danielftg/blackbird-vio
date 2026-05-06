@@ -2,8 +2,8 @@
 
 This script:
 1. Finds the bag under the repository's ./bags folder
-2. Loads motor data and saves it as CSV
-3. Loads body pose data and saves it as CSV
+2. Loads motor data, preprocesses it and saves it as CSV
+3. Loads body pose data, preprocesses it and saves it as CSV
 4. Loads image data and saves it as PNG files
 
 Run:
@@ -87,14 +87,20 @@ def preprocessing(
     - Per-rotor thrusts u_{k-1} = (T1, T2, T3, T4)         — algorithm input
     - Pose S_k + body-frame velocities                      — for evaluation
     """
+    
+    with open ("calibration.yaml", "r", encoding="utf-8") as file:
+        data = yaml.safe_load(file)
+
     # ── Camera timeline ───────────────────────────────────────────────────────
     camera_timestamps_ns = sorted(set(t for t, _ in iter_left_images(bag_path)))
     camera_timestamps_s  = np.array(camera_timestamps_ns) * 1e-9
 
     # ── Pose: position via linear interp, rotation via SLERP ─────────────────
     # 3a+3b: build T_W_B for each vicon sample
-    R_M_B = jaxlie.SO3.from_matrix(jnp.diag(jnp.array([1.0, -1.0, -1.0])))
-    T_M_B = jaxlie.SE3.from_rotation_and_translation(R_M_B, jnp.zeros(3))
+    R_MB = jnp.array(data["vicon_params"]["body_to_marker"]["rotation"])      # (3, 3)
+    t_MB = jnp.array(data["vicon_params"]["body_to_marker"]["translation"]) 
+    R_M_B = jaxlie.SO3.from_matrix(R_MB)
+    T_M_B = jaxlie.SE3.from_rotation_and_translation(R_M_B, t_MB)
 
     T_W_B_list = []
     for _, row in pose.iterrows():
@@ -121,7 +127,7 @@ def preprocessing(
     # 3e: differentiate to get body-frame velocities
     dt = np.diff(camera_timestamps_s)
     xi_raw = np.stack([
-        (S_list[k+1] @ S_list[k].inverse()).log() / dt[k]
+        (S_list[k] @ S_list[k+1].inverse()).log() / dt[k]
         for k in range(len(S_list) - 1)
     ])
     xi_smooth = savgol_filter(xi_raw, window_length=11, polyorder=3, axis=0)
@@ -129,23 +135,19 @@ def preprocessing(
     omega_B = xi_smooth[:, 3:]
 
     # Build aligned_pose from SE(3) results
-    # S_list has N entries, v_B/omega_B have N-1 entries
-    # Drop first S to align with velocities (matches the u_{k-1} convention too)
-    translations = np.stack([s.translation() for s in S_list[1:]])
-    quaternions  = np.stack([s.rotation().as_quaternion_xyzw() for s in S_list[1:]])
+    translations = np.stack([s.translation() for s in S_list])
+    quaternions  = np.stack([s.rotation().as_quaternion_xyzw() for s in S_list])
 
     aligned_pose = pd.DataFrame(
-        np.hstack([translations, quaternions, v_B, omega_B]),
+        np.hstack([translations[:-1], quaternions[:-1], v_B, omega_B]),
         columns=['x', 'y', 'z', 'qx', 'qy', 'qz', 'qw', 'vx', 'vy', 'vz', 'wx', 'wy', 'wz']
     )
-    aligned_pose.insert(0, 'timestamp_s',  camera_timestamps_s[1:])
-    aligned_pose.insert(0, 'timestamp_ns', camera_timestamps_ns[1:])
+    aligned_pose.insert(0, 'timestamp_s',  camera_timestamps_s[:-1])
+    aligned_pose.insert(0, 'timestamp_ns', camera_timestamps_ns[:-1])
 
     # ── Motor: interpolate then apply u_{k-1} lag ─────────────────────────────
     # Pivot to wide format: one row per timestamp, one column per motor
 
-    with open ("calibration.yaml", "r") as file:
-        data = yaml.safe_load(file)
     rpm_thr_coeff = [
     data['rotor_1']['rpm_thr_coeff'],  # m1
     data['rotor_4']['rpm_thr_coeff'],  # m4 → rotor 2
@@ -159,7 +161,7 @@ def preprocessing(
     motor_pivot = motor_pivot.ffill().bfill()  # fill gaps per motor column
     motor_pivot = motor_pivot.reset_index()
 
-    valid_rpm_min, valid_rpm_max = 0, 7000  # adjust motor spec
+    valid_rpm_min, valid_rpm_max = 0, 8000   # adjust motor spec
 
     motor_pivot[motor_cols] = motor_pivot[motor_cols].clip(
         lower=valid_rpm_min, upper=valid_rpm_max
@@ -173,10 +175,6 @@ def preprocessing(
     )
     aligned_motor.insert(0, 'timestamp_s',  camera_timestamps_s)
     aligned_motor.insert(0, 'timestamp_ns', camera_timestamps_ns)
-
-    # u_{k-1}: motor command at step k-1 pairs with camera frame at step k.
-    # Drop the first camera frame (no prior motor command) and the last motor row.
-    aligned_motor = aligned_motor.iloc[:-1].reset_index(drop=True)   # u_0 … u_{N-1}
 
     return aligned_pose, aligned_motor
 
@@ -194,8 +192,8 @@ def export_csv_data(bag_path: Path) -> None:
     """Export motor and pose data to CSV."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    motor = load_motor_data(bag_path)
-    pose = load_body_pose(bag_path)
+    motor = load_motor_data(bag_path).sort_values("timestamp_ns").reset_index(drop=True)
+    pose  = load_body_pose(bag_path).sort_values("timestamp_ns").reset_index(drop=True)
 
     aligned_pose, aligned_motor_melt = preprocessing(motor, pose, bag_path)
 
