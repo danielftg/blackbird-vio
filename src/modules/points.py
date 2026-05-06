@@ -105,7 +105,7 @@ class Point:
         """Roll k → k-1: current frame's quantities become previous, and
         previous quantities are discarded. Age increments by one. 
         """
-            # Pixel observations
+        # Pixel observations
         self.uL_prev = self.uL_curr
         self.uR_prev = self.uR_curr
         self.uL_curr = None
@@ -298,6 +298,7 @@ class IdSource:
         point_id = self._next_id
         self._next_id += 1
         return point_id
+    
     
 if __name__ == "__main__":
     ids = IdSource()
