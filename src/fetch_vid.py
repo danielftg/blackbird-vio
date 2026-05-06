@@ -61,7 +61,7 @@ BAG_PATH = BAGS_DIR / "indoor_loadless_hovor_3096.1g_79.04s.bag"
 
 # Set this to None to export all images.
 # Keep it small while testing so you do not write thousands of images by accident.
-MAX_IMAGES_PER_CAMERA = 20
+MAX_IMAGES_PER_CAMERA = None
 
 def interpolate_to_camera_times(
     data_times: np.ndarray,
