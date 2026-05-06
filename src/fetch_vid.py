@@ -128,25 +128,6 @@ def preprocessing(
     v_B     = xi_smooth[:, :3]
     omega_B = xi_smooth[:, 3:]
 
-    # pose_times = pose['timestamp_s'].values
-
-    # # x, y, z — standard linear interpolation
-    # aligned_pos = interpolate_to_camera_times(
-    #     pose_times,
-    #     pose[['x', 'y', 'z']].values,
-    #     ['x', 'y', 'z'],
-    #     camera_timestamps_s,
-    # )
-
-    # # qx, qy, qz, qw — SLERP to preserve unit-quaternion constraint
-    # slerp = Slerp(pose_times, Rotation.from_quat(pose[['qx', 'qy', 'qz', 'qw']].values))
-    # interp_quats = slerp(camera_timestamps_s).as_quat()   # (N, 4) array: x y z w
-    # aligned_rot = pd.DataFrame(interp_quats, columns=['qx', 'qy', 'qz', 'qw'])
-
-    # aligned_pose = pd.concat([aligned_pos, aligned_rot], axis=1)
-    # aligned_pose.insert(0, 'timestamp_s',  camera_timestamps_s)
-    # aligned_pose.insert(0, 'timestamp_ns', camera_timestamps_ns)
-
     # Build aligned_pose from SE(3) results
     # S_list has N entries, v_B/omega_B have N-1 entries
     # Drop first S to align with velocities (matches the u_{k-1} convention too)
@@ -171,7 +152,6 @@ def preprocessing(
     data['rotor_3']['rpm_thr_coeff'],  # m3 → rotor 3
     data['rotor_2']['rpm_thr_coeff'],  # m2 → rotor 4
     ]
-
 
     motor_cols  = ['m1', 'm4', 'm3', 'm2']
 
