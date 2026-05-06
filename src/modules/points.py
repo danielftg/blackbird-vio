@@ -105,7 +105,22 @@ class Point:
         """Roll k → k-1: current frame's quantities become previous, and
         previous quantities are discarded. Age increments by one. 
         """
-        ...
+        # Pixel observations
+        self.uL_prev = self.uL_curr
+        self.uR_prev = self.uR_curr
+        self.uL_curr = None
+        self.uR_curr = None
+
+        # 3D state
+        self.p_prev = self.p_curr
+        self.v_prev = self.v_curr
+        self.Sigma_prev = self.Sigma_curr
+
+        self.p_curr = None
+        self.v_curr = None
+        self.Sigma_curr = None
+
+        self.n += 1
 
     def get_px_type(self) -> PixelType:
         """Classify the point by which stereo pixel observations are
@@ -165,51 +180,103 @@ class PointSet:
         self._points: dict[int, Point] = {}
 
     # ---- container protocol ----------------------------------------------
-    def __len__(self) -> int: ...
-    def __contains__(self, pid: int) -> bool: ...
-    def __iter__(self) -> Iterator[Point]: ...
-    def __getitem__(self, pid: int) -> Point: ...
+    def __len__(self) -> int:
+        return len(self._points)
+
+
+    def __contains__(self, pid: int) -> bool:
+        return pid in self._points
+
+
+    def __iter__(self) -> Iterator[Point]:
+        return iter(self._points.values())
+
+
+    def __getitem__(self, pid: int) -> Point:
+        return self._points[pid]
 
     # ---- mutation --------------------------------------------------------
     def add(self, p: Point) -> None:
-        """Insert a point. Raises if id already present."""
-        ...
+        """Insert a point.
+
+        Raises:
+            ValueError: if a point with the same id already exists.
+        """
+        if p.id in self._points:
+            raise ValueError(
+                f"Point id {p.id} already exists in PointSet '{self.name}'"
+            )
+
+        self._points[p.id] = p
+
 
     def remove(self, pid: int) -> Point:
-        """Remove and return a point. Raises if not present."""
-        ...
+        """Remove and return a point.
+
+        Raises:
+            KeyError: if the point id is not present.
+        """
+        return self._points.pop(pid)
+
 
     def discard(self, pid: int) -> None:
         """Remove a point if present, no-op otherwise."""
-        ...
+        self._points.pop(pid, None)
+
 
     def roll(self) -> None:
         """Call .roll() on every contained point."""
-        ...
+        for point in self._points.values():
+            point.roll()
 
     # ---- queries ---------------------------------------------------------
     def ids(self) -> set[int]:
         """All currently-held point ids."""
-        ...
+        return set(self._points.keys())
 
-    def filter(self, predicate) -> "PointSet":
+
+    def filter(self, predicate: Callable[[Point], bool]) -> "PointSet":
         """Return a new PointSet containing points where predicate(p) is True.
-        Does not deep-copy points — both sets share Point references.
-        """
-        ...
-        
-    def filter_px_type(self, t: PixelType) -> Iterator[Point]: 
-        ...
 
-    def filter_state_type(self, t: StateType) -> Iterator[Point]: 
+        Does not deep-copy points. Both sets share Point references.
+        """
+        result = PointSet(name=f"{self.name}_filtered")
+
+        for point in self._points.values():
+            if predicate(point):
+                result.add(point)
+
+        return result 
         ...
 
     # ---- bulk transfer ---------------------------------------------------
     def move_to(self, other: "PointSet", pids: set[int]) -> None:
-        """Move points by id from this set to another (e.g. F_pre → F on
-        admission, F → drop on graduation-out, etc.).
+        """Move points by id from this set to another.
+
+        Example:
+            F_pre.move_to(F, admitted_ids)
+
+        Raises:
+            KeyError: if any requested id is missing from this set.
+            ValueError: if any requested id already exists in the destination set.
         """
-        ...
+        missing = pids - self.ids()
+        if missing:
+            raise KeyError(
+                f"Cannot move missing point ids from PointSet '{self.name}': "
+                f"{sorted(missing)}"
+            )
+
+        duplicates = pids & other.ids()
+        if duplicates:
+            raise ValueError(
+                f"Cannot move point ids to PointSet '{other.name}' because "
+                f"they already exist there: {sorted(duplicates)}"
+            )
+
+        for pid in pids:
+            point = self.remove(pid)
+            other.add(point)
 
 
 # =============================================================================
@@ -217,8 +284,42 @@ class PointSet:
 # =============================================================================
 
 class IdSource:
-    """Monotonic id generator. Single instance shared across the pipeline so
-    ids never collide between sets or across re-detections.
+    """Monotonic id generator.
+
+    Single instance shared across the pipeline so ids never collide between
+    sets or across re-detections.
     """
-    def __init__(self, start: int = 0) -> None: ...
-    def next(self) -> int: ...
+
+    def __init__(self, start: int = 0) -> None:
+        self._next_id = start
+
+    def next(self) -> int:
+        """Return the next unique point id."""
+        point_id = self._next_id
+        self._next_id += 1
+        return point_id
+    
+    
+if __name__ == "__main__":
+    ids = IdSource()
+
+    F_pre = PointSet("F_pre")
+    F = PointSet("F")
+
+    p0 = Point(id=ids.next())
+    p1 = Point(id=ids.next())
+
+    F_pre.add(p0)
+    F_pre.add(p1)
+
+    print("F_pre ids before move:", F_pre.ids())
+    print("F ids before move:", F.ids())
+
+    F_pre.move_to(F, {0})
+
+    print("F_pre ids after move:", F_pre.ids())
+    print("F ids after move:", F.ids())
+
+    F.roll()
+
+    print("Point age after roll:", F[0].n)
