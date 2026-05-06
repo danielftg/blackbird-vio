@@ -251,15 +251,13 @@ $RECYCLE.BIN/
 # Streamlit
 .streamlit/secrets.toml
 
-# Ignore outputs completely
-output/
+# outputs
+outputs/*
+!outputs/.gitkeep
 
-# Ignore everything in bags
-bags/*
-
-# But keep the directory and the gitkeep file
+# Ignore dataset files, but keep the empty bags folder
+bags/**
 !bags/
 !bags/.gitkeep
 
-# Ignore bag files anywhere
 *.bag
