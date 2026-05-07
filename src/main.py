@@ -1,0 +1,150 @@
+"""
+main.py — Entry point. No logic; only orchestration.
+
+Creates/reads preprocessed data from output/, runs the estimator one frame at
+a time, writes per-frame estimates to a results file. Evaluation is a
+separate post-hoc step (eval.py) that consumes the same file.
+
+Usage example:
+    python main.py [--data DIR] [--results PATH] [--limit N]
+"""
+
+import argparse
+from pathlib import Path
+import logging
+import pandas as pd
+import numpy as np
+import cv2 as cv
+from cv2.typing import MatLike
+
+import modules.utils as util
+import modules.algo as algo
+import eval
+import fetch_vid
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--data",        type=Path, default=Path("output"))
+    p.add_argument("--results",     type=Path, default=Path("output/results.csv"))
+    p.add_argument("--limit",       type=int,  default=None,
+                   help="Process only the first N frames (debugging)")
+    p.add_argument("--fetch_vid",    action="store_true",
+                   help="Run fetch_vid before estimation starts")
+    p.add_argument("--evaluate",    action="store_true",
+                   help="Run eval after estimation completes")
+    p.add_argument("--log-level",   default="INFO")
+    return p.parse_args()
+
+
+
+def list_image_pairs(data_dir: Path) -> list[tuple[Path, Path]]:
+    """Enumerate (left, right) image pairs in chronological order.
+
+    Filenames are formatted as <prefix>_<frame_idx>_<timestamp_ns>.png;
+    sorting lexicographically gives chronological order.
+    """
+    left_dir  = data_dir / "images" / "left"
+    right_dir = data_dir / "images" / "right"
+    lefts  = sorted(left_dir.glob("*.png"))
+    rights = sorted(right_dir.glob("*.png"))
+    if len(lefts) != len(rights):
+        raise RuntimeError(
+            f"image count mismatch: {len(lefts)} L vs {len(rights)} R")
+    return list(zip(lefts, rights))
+
+
+def load_image(path: Path) -> MatLike:
+    """Read an image as grayscale uint8."""
+    img = cv.imread(str(path), cv.IMREAD_GRAYSCALE)
+    if img is None:
+        raise RuntimeError(f"failed to read image: {path}")
+    return img
+
+
+def main() -> None:
+    args = parse_args()
+    logging.basicConfig(
+        level=args.log_level,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
+    log = logging.getLogger("main")
+
+    # ---- optional fetch dataset ----------------------------------------
+    if args.fetch_vid:
+        fetch_vid.main()
+
+    # ---- load config ---------------------------------------------------
+    alg = util.load_yaml("modules/constants/algorithm.yaml")
+
+    # ---- load preprocessed data -----------------------------------------
+    motor = pd.read_csv(args.data / "motor_data.csv")
+    pose  = pd.read_csv(args.data / "body_pose.csv")    # GT, used by eval only
+    pairs = list_image_pairs(args.data)
+    if args.limit is not None:
+        pairs = pairs[: args.limit]
+
+    motor_cols = ["m1", "m4", "m3", "m2"]   # in our rotor order: 1, 2, 3, 4
+    log.info("loaded %d frames, %d motor rows, %d pose rows",
+             len(pairs), len(motor), len(pose))
+
+    # ---- focus stub -----------------------------------------------------
+    # Focus mechanism not yet driven by any external signal
+    # Replace when we have a focus source.
+    F_default     = np.array(alg["focus"]["point"]) 
+    sigma_F       = float(alg["focus"]["sigma"])
+
+    # ---- estimator ------------------------------------------------------
+    estimator = algo.Algo()
+   
+    # ---- prepare results file ------------------------------------------------
+    args.results.parent.mkdir(parents=True, exist_ok=True)
+    if args.results.exists():
+        args.results.unlink()                  # fresh start each run
+
+    for k, (path_L, path_R) in enumerate(pairs):
+        L = load_image(path_L)
+        R = load_image(path_R)
+
+        # timestamp from filename: <prefix>_<idx>_<timestamp_ns>.png
+        t_k_ns = int(path_L.stem.split("_")[-1])
+        t_k    = t_k_ns * 1e-9
+
+        if k == 0:
+            output = estimator.init(L, R, t_k, F_default, sigma_F)
+        else:
+            # control input is u_{k-1}: row k-1 of motor_data.csv
+            u_km1 = motor.iloc[k - 1][motor_cols].to_numpy(dtype=np.float64)
+            output = estimator.iter(L, R, t_k, u_km1, F_default, sigma_F)
+
+        if k % 100 == 0:
+            log.info("frame %d / %d", k, len(pairs))
+
+        # ---- write results --------------------------------------------------
+        row = serialize_output(k, t_k_ns, output)
+        pd.DataFrame([row]).to_csv(
+                args.results,
+                mode="a",
+                header=(k == 0),                   # header only on first row
+                index=False,
+        )
+        
+    # ---- optional evaluation --------------------------------------------
+    if args.evaluate:
+        eval.evaluate(
+            results_path=args.results,
+            ground_truth_path=args.data / "body_pose.csv",
+        )
+
+
+def serialize_output(k: int, t_k_ns: int, output:algo.IterOutput) -> dict:
+    """Flatten one IterOutput into a flat dict for DataFrame storage.
+    (timestamp_ns, pose, v_B, ω_B, plus optional diagnostics)
+    (timestamp_ns,x,y,z,qx,qy,qz,qw,vx,vy,vz,wx,wy,wz,...)
+    Disturbance/gravity-body included for diagnostics.
+    """
+    ...   
+
+
+if __name__ == "__main__":
+    main()

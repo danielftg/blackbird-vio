@@ -1,5 +1,5 @@
 """
-Functions for reading the drone ROS bag stored in the ./bags folder.
+bag_loader.py — Functions for reading the drone ROS bag stored in the ./bags folder.
 
 This file is intended to be placed in the root of your repository:
 

@@ -1,10 +1,5 @@
-"""Example script for exporting drone bag data.
-
-This script:
-1. Finds the bag under the repository's ./bags folder
-2. Loads motor data, preprocesses it and saves it as CSV
-3. Loads body pose data, preprocesses it and saves it as CSV
-4. Loads image data and saves it as PNG files
+"""
+fetch_vid.py — Preprocess a VID-Dataset rosbag into algorithm-ready inputs.
 
 Run:
 
@@ -13,11 +8,11 @@ Run:
 Output is written to:
 
     output/
-        motor_data.csv
-        body_pose.csv
+        motor_data.csv      # one row per camera frame: t_k, T_1..T_4
+        body_pose.csv       # one row per camera frame: t_k, pose, v_B, ω_B
         images/
-            left/
-            right/
+            left/           # left_<idx>_<timestamp_ns>.png
+            right/          # right_<idx>_<timestamp_ns>.png
 """
 
 from pathlib import Path
@@ -26,16 +21,11 @@ import cv2
 import numpy as np
 import pandas as pd
 import yaml
-# from scipy.interpolate import interp1d
 from scipy.interpolate import make_interp_spline
-from scipy.spatial.transform import Rotation, Slerp
 from rosbags.typesys import get_typestore
 import jax.numpy as jnp
 import jaxlie
 from scipy.signal import savgol_filter
-from rosbags.highlevel import AnyReader
-
-
 
 from modules.bag_loader import (
     get_bag_path,
@@ -44,7 +34,6 @@ from modules.bag_loader import (
     load_motor_data,
     iter_left_images,
     iter_right_images,
-    read_topic,
 )
 
 

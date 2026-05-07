@@ -16,19 +16,20 @@ Distinguishes two roles for "keypoints":
 
 from __future__ import annotations
 from dataclasses import dataclass
+from cv2.typing import MatLike
 import cv2 as cv
 import numpy as np
 import jax.numpy as jnp
 import jaxlie
 
 from .points import Point, PointSet, PixelType
-
+from .ekf import project_point
 
 # =============================================================================
 # Detection — FAST + Shi-Tomasi (§sec:cv)
 # =============================================================================
 
-def detect_keypoints(image: np.ndarray, calib: dict, alg: dict
+def detect_keypoints(image: MatLike, calib: dict, alg: dict
                      ) -> list[cv.KeyPoint]:
     """Run FAST detection then Shi-Tomasi cornerness scoring on `image`.
 
@@ -39,6 +40,7 @@ def detect_keypoints(image: np.ndarray, calib: dict, alg: dict
     Stored once per frame in the pipeline; passed to allocators below.
     """
     ...
+    alg["cv"]["tau_min"] #absolute threshold = tau_min · max eigenvalue in image)
 
 
 # =============================================================================
@@ -47,15 +49,20 @@ def detect_keypoints(image: np.ndarray, calib: dict, alg: dict
 
 def grid_select_features(pool: list[cv.KeyPoint],
                          existing: PointSet,
-                         calib: dict, alg: dict
+                         calib: dict, alg: dict, camera: "str"
                          ) -> list[cv.KeyPoint]:
     """Allocate feature replenishments uniformly across an N×M grid.
 
     Picks N_feat,gl total across the image, with at least N_feat,lo per
-    cell (cells with no candidates left empty). Uses Shi-Tomasi response
+    cell (cells with no candidates left empty, cell size from alg). Uses Shi-Tomasi response
     as the per-cell ranker. Suppresses cells already saturated by points
-    in `existing` (avoid clustering on existing trackers).
+    in `existing` (avoid clustering on existing trackers, dont select existing points.).
     """
+    alg["cv"]["grid_cells"]
+    calib["camera_intrinsics"]["left"]["size"]
+    alg["cv"]["N_feat_gl"]
+    alg["cv_N_feat_lo"]
+    alg["cv"]["N_F_max"]
     ...
 
 
@@ -63,30 +70,29 @@ def focus_select_interest(pool: list[cv.KeyPoint],
                           focus_B: np.ndarray,
                           sigma_F: float,
                           existing: PointSet,
-                          calib: dict, alg: dict
-                          ) -> dict[str, list[cv.KeyPoint]]:
+                          calib: dict, alg: dict, camera: "str"
+                          ) -> list[cv.KeyPoint]:
     """Allocate interest points around the focus projection per camera.
 
     focus_B : (3,) focus point F_{k-1} in body frame
     sigma_F : Gaussian spread
 
-    Projects focus into each camera, builds a truncated 2D Gaussian over
+    Projects focus into the camera ("L" or "R"), builds a truncated 2D Gaussian over
     the grid centred on the projection, allocates floor(N_I/2 · p_g) per
     cell with residual to the peak. Within each cell the top-by-response
-    keypoints are picked.
-
-    Returns {"L": [...], "R": [...]} — one list per camera. Stereo
-    matching of these into mono/stereo Points is the caller's job
-    (via stereo_match below).
+    keypoints are picked (See paper for details).
+    Don't select existing points.
     """
-    ...
-
+    alg["cv"]["grid_cells"]
+    calib["camera_intrinsics"]["size"]
+    project_point
+    alg["cv"]["N_I_max"]
 
 # =============================================================================
 # Stereo matching — NCC (§sec:cv)
 # =============================================================================
 
-def stereo_match(image_src: np.ndarray, image_dst: np.ndarray,
+def stereo_match(image_src: MatLike, image_dst: MatLike,
                  keypoints_src: list[cv.KeyPoint],
                  calib: dict, alg: dict,
                  direction: str = "L→R"
@@ -103,6 +109,10 @@ def stereo_match(image_src: np.ndarray, image_dst: np.ndarray,
 
     NCC threshold and search-window parameters from algorithm.yaml.
     """
+    alg["cv"]["disp_min"]
+    alg["cv"]["disp_max"]
+    alg["cv"]["stereo_subpix"]
+    alg["cv"]["ncc_min"]
     ...
 
 
@@ -110,21 +120,21 @@ def stereo_match(image_src: np.ndarray, image_dst: np.ndarray,
 # Stereo depth and covariance (§sec:depth_estimation)
 # =============================================================================
 
-def reconstruct_depth(uL: np.ndarray, uR: np.ndarray,
-                      calib: dict
-                      ) -> tuple[np.ndarray, np.ndarray]:
-    """Triangulate (u_L, u_R) pixel pairs into a body-frame 3D point.
+def reconstruct_depth(points: PointSet,
+                      calib:  dict
+                      ) -> PointSet:
+    """Triangulate current (u_L, u_R) pixel pairs into a body-frame 3D point.
 
     For rectified stereo:  Z = b·fx / (uL.x − uR.x)
                             X = (uL.x − cx) · Z / fx
                             Y = (uL.y − cy) · Z / fy
     Then transform from left-camera frame into body frame via T_BL.
 
-    Returns (p_B, Σ_p) where Σ_p is the 3×3 position covariance from
+    Add (p_B, Σ_p) to the stereo points in the pointset.
+    Where Σ_p is the 3×3 position covariance from
     propagating σ_px² (calibration.yaml) through the triangulation
     Jacobian. 
-
-    Vectorised: uL, uR shape (N, 2); returns p_B (N, 3) and Σ_p (N, 3, 3).
+    
     """
     ...
 
@@ -191,8 +201,8 @@ def candidate_set(p: Point,
     ...
 
 
-def ssd_coarse_match(image_src: np.ndarray, image_dst: np.ndarray,
-                     u_src: np.ndarray,
+def ssd_coarse_match(image_src: MatLike, image_dst: MatLike,
+                     u_src: np.KeyPoint,
                      candidates: list[CandidateSample],
                      calib: dict, alg: dict
                      ) -> CandidateSample | None:
@@ -207,8 +217,8 @@ def ssd_coarse_match(image_src: np.ndarray, image_dst: np.ndarray,
     ...
 
 
-def lk_refine(image_src: np.ndarray, image_dst: np.ndarray,
-              u_src: np.ndarray, u_init: np.ndarray,
+def lk_refine(image_src: MatLike, image_dst: MatLike,
+              u_src: np.KeyPoint, u_init: np.KeyPoint,
               alg: dict
               ) -> np.ndarray:
     """Pyramidal Lucas-Kanade refinement from coarse seed `u_init`.
@@ -220,8 +230,8 @@ def lk_refine(image_src: np.ndarray, image_dst: np.ndarray,
     ...
 
 
-def fb_check(image_src: np.ndarray, image_dst: np.ndarray,
-             u_src: np.ndarray, u_dst: np.ndarray,
+def fb_check(image_src: MatLike, image_dst: MatLike,
+             u_src: cv.KeyPoint, u_dst: cv.KeyPoint,
              alg: dict
              ) -> bool:
     """Forward-backward consistency. Re-track u_dst back into image_src;
@@ -236,7 +246,7 @@ def fb_check(image_src: np.ndarray, image_dst: np.ndarray,
 # =============================================================================
 
 def temporal_match_one(p: Point,
-                       image_src: np.ndarray, image_dst: np.ndarray,
+                       image_src: MatLike, image_dst: MatLike,
                        delta_T_hat: jaxlie.SE3, Sigma_xi: np.ndarray,
                        dt: float, calib: dict, alg: dict,
                        camera: str
@@ -251,7 +261,7 @@ def temporal_match_one(p: Point,
     ...
 
 
-def stereo_promote(p: Point, image_other: np.ndarray,
+def stereo_promote(p: Point, image_other: MatLike,
                    calib: dict, alg: dict
                    ) -> cv.KeyPoint | None:
     """Mono-to-stereo: `p` has only one camera populated at frame k.

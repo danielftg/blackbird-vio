@@ -23,6 +23,32 @@ from .points import Point, PointSet
 
 
 # =============================================================================
+# Shared functions
+# =============================================================================
+def project_point(p_B: jnp.ndarray, calib: dict, camera: str) -> jnp.ndarray:
+    """Project a body-frame point into camera `camera` ∈ {"L", "R"}.
+
+        û = π(R_cB · p_B + t_c)
+
+    Args:
+        p_B    : body-frame point. Shape (1,3) for a single point or
+                 (N, 3) for a batch.
+        calib  : parsed calibration.yaml; reads camera_intrinsics and
+                 camera_extrinsics for the requested camera.
+        camera : "L" or "R".
+
+    Returns:
+        Pixel coordinate(s) in the requested camera. Shape (1,2) for a
+        single input, (N, 2) for a batch.
+
+    Raises:
+        ValueError if camera is not "L" or "R", or if a point lies on or
+        behind the focal plane (z_c <= 0) — caller should pre-filter.
+    """
+    ...
+
+
+# =============================================================================
 # State container
 # =============================================================================
 

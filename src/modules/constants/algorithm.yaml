@@ -3,6 +3,12 @@
 # No values dependent on physical reality. Those go into calibration.
 # =============================================================================
 
+# Default focus point and region.
+focus:
+  point: [5.0, 0.0, 0.0]
+  sigma: 80.0
+
+
 signif:                                # significance levels (∈ (0, 1))
   alpha_NIS:  0.99                     # NIS gate (§4.2). χ² test on Mahalanobis
                                        # distance of measurement residuals.
@@ -41,6 +47,7 @@ cv:                                    # computer vision parameters
                                        # (~3.3 s at 60 Hz)
 
   # ---- stereo matching --------------------------------------------------
+  ncc_min:        0.8                  # Minimum NCC value for stereo matching
   disp_min:       1.0                  # min disparity [px]. Avoid div-by-zero
                                        # at infinity; enforces Z_max constraint
   disp_max:       128                  # max disparity [px]. Enforces Z_min
