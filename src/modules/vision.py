@@ -113,6 +113,7 @@ def stereo_match(image_src: MatLike, image_dst: MatLike,
     alg["cv"]["disp_max"]
     alg["cv"]["stereo_subpix"]
     alg["cv"]["ncc_min"]
+    alg["cv"]["ncc_patch_size"]
     ...
 
 
@@ -124,7 +125,7 @@ def reconstruct_depth(points: PointSet,
                       calib:  dict
                       ) -> PointSet:
     """Triangulate current (u_L, u_R) pixel pairs into a body-frame 3D point.
-
+        Only do so for points without 3D point data.
     For rectified stereo:  Z = b·fx / (uL.x − uR.x)
                             X = (uL.x − cx) · Z / fx
                             Y = (uL.y − cy) · Z / fy
@@ -158,17 +159,11 @@ def predict_pixel(delta_T: jaxlie.SE3,
                   p_Bkm1: np.ndarray, v_p: np.ndarray,
                   dt: float, calib: dict, camera: str
                   ) -> np.ndarray:
-    """Prediction function (§eq:u_pred): pose change × point + velocity
+    """Prediction function (§eq:u_pred): pose change x point + velocity
     transport, projected through camera `camera` ∈ {"L", "R"}..
     """
-    ...
-
-def predict_pixel_feature(p_Bk: np.ndarray, calib: dict, camera: str
-                          ) -> np.ndarray:
-    """Project an EKF feature point already expressed in B_k into camera
-    `camera` ∈ {"L", "R"}.
-    """
-    ...
+    project_point
+    
 
 @dataclass
 class CandidateSample:
@@ -177,11 +172,17 @@ class CandidateSample:
     Carries the input that produced the candidate so the winning sample
     can warm-start the joint solver (§search_region step 6).
     """
-    pixel: np.ndarray            # (2,) projected pixel
-    delta_T: jaxlie.SE3          # ΔT sample
-    p_Bkm1: np.ndarray           # (3,) p sample
-    v_p: np.ndarray              # (3,) velocity sample (or v_⊥ scalar for MM)
-
+    def predict(self, delta_t: float, calib: dict, camera: str) -> None:
+        self.pixel = predict_pixel(self.delta_T, self.p_Bkm1, self.v_p,
+                                   delta_t, calib, camera)
+        
+    keypoint: cv.KeyPoint = None  # Populated by SSD match
+    pixel: np.ndarray     = None  # (2,) Predicted pixel 
+    delta_T: jaxlie.SE3   = None  # ΔT sample
+    p_Bkm1: np.ndarray    = None  # (3,) p sample 
+    v_p: np.ndarray       = None  # (3,) velocity sample (or v_⊥ scalar for MM)
+    p_Bk: np.ndarray      = None  # (3,) p sample (Only relevant for feature points)
+   
 
 def candidate_set(p: Point,
                   delta_T_hat: jaxlie.SE3, Sigma_xi: np.ndarray,
@@ -198,34 +199,66 @@ def candidate_set(p: Point,
     Returns the list of (pixel, sample) candidates whose projections
     fall in the image. Empty list ⇒ nothing to match (caller skips).
     """
+    alg["signif"]["alpha_sr"]
+    alg["cv"]["Z_min"], alg["cv"]["Z_max"]
+    alg["cv"]["v_max"]
+    alg["cv"]["a_max"]
+    CandidateSample()
+    CandidateSample().predict
+    calib["camera_intrinsics"]["L"]["size"]
+    ...
+
+def candidate_feature_set(p: Point,
+                  p_Bk:jnp.ndarray, sigma:jnp.ndarray, 
+                  calib: dict, alg: dict, camera: str
+                  ) -> list[CandidateSample]:
+    """Generate candidate pixels for `p` by sampling the uncertainty
+    ellipsoid given by p_Bk and sigma (§search_region).
+
+    p_Bk is the center of the ellipsoid. sigma is a 3x3 covariance.
+
+    Returns the list of candidates within the ellipsoid for some significance level.
+    Points must project to pixels in the image.
+    Empty list ⇒ nothing to match (caller skips).
+    
+    """
+    alg["signif"]["alpha_sr"]
+    CandidateSample().pixel
+    CandidateSample().p_Bk
+    CandidateSample().v_p #Set this to (0,0,0). 
+    project_point
+    calib["camera_intrinsics"]["L"]["size"]
     ...
 
 
 def ssd_coarse_match(image_src: MatLike, image_dst: MatLike,
-                     u_src: np.KeyPoint,
+                     u_src: cv.KeyPoint,
                      candidates: list[CandidateSample],
                      calib: dict, alg: dict
                      ) -> CandidateSample | None:
     """Evaluate SSD between the reference patch at u_src in image_src
     and each candidate location in image_dst. Return the lowest-SSD
-    candidate, or None if none beat the SSD threshold (algorithm.yaml).
+    candidate.
 
-    Patch size and SSD threshold from algorithm.yaml. SSD chosen over
+    Patch size from algorithm.yaml. SSD chosen over
     NCC because src and dst are the same camera one frame apart —
     brightness/contrast invariance not needed.
     """
+    alg["cv"]["ssd_patch_size"]
+    #Evaluate SSD at candidates[i].pixel 
+    #Populate candidates[i].keypoint for winning candidate
     ...
 
 
 def lk_refine(image_src: MatLike, image_dst: MatLike,
-              u_src: np.KeyPoint, u_init: np.KeyPoint,
+              u_src: cv.KeyPoint, u_init: cv.KeyPoint,
               alg: dict
-              ) -> np.ndarray:
+              ) -> cv.keyPoint:
     """Pyramidal Lucas-Kanade refinement from coarse seed `u_init`.
 
     Wraps cv.calcOpticalFlowPyrLK. Window size, pyramid levels,
     termination criteria from algorithm.yaml.
-    Returns the refined sub-pixel position.
+    Returns the refined keypoint.
     """
     ...
 
@@ -237,6 +270,7 @@ def fb_check(image_src: MatLike, image_dst: MatLike,
     """Forward-backward consistency. Re-track u_dst back into image_src;
     accept iff round-trip pixel error < ε_fb (algorithm.yaml).
     Primary failure detector for LK tracking.
+    True if passed check. 
     """
     ...
 
@@ -245,30 +279,58 @@ def fb_check(image_src: MatLike, image_dst: MatLike,
 # Convenience wrappers
 # =============================================================================
 
+
+def temporal_match_one_feature(p: Point,
+                       image_src: MatLike, image_dst: MatLike,
+                       P_Bk: jnp.ndarray, sigma: jnp.ndarray, 
+                       calib: dict, alg: dict,
+                       camera: str
+                       ) -> CandidateSample | None:
+    """Full temporal-matching pipeline for one feature point in one camera.
+
+    Composes feature_candidate_set → ssd_coarse_match → lk_refine → fb_check.
+    Returns CandidateSample on success, None on any failure.
+    """
+    assert camera in ["L", "R"], "The camera is given by 'L' or 'R'"
+    if camera == "L":
+        kpt_src = p.uL_prev
+    if camera == "R":
+        kpt_src = p.uR_prev
+    
+    cands = candidate_feature_set(p, P_Bk, sigma, calib, alg, camera)
+    if len(cands) != 0:
+        cand = ssd_coarse_match(image_src, image_dst, kpt_src, cands, calib, alg)
+        cand.keypoint = lk_refine(image_src, image_dst, kpt_src, cand.keypoint, alg)
+        passed = fb_check(image_src, image_dst, kpt_src, cand.keypoint, alg)
+        if passed:
+            return cand
+        
+    return None
+
+
 def temporal_match_one(p: Point,
                        image_src: MatLike, image_dst: MatLike,
-                       delta_T_hat: jaxlie.SE3, Sigma_xi: np.ndarray,
+                       delta_T: jaxlie.SE3, Sigma_xi: np.ndarray,
                        dt: float, calib: dict, alg: dict,
                        camera: str
-                       ) -> tuple[np.ndarray, CandidateSample] | None:
+                       ) -> CandidateSample | None:
     """Full temporal-matching pipeline for one point in one camera.
 
     Composes candidate_set → ssd_coarse_match → lk_refine → fb_check.
-    Returns (u_matched, init_sample) on success, None on any failure.
-    `init_sample` is the candidate input that won — caller passes it to
-    the joint solver as the warm-start (§search_region step 6).
+    Returns CandidateSample on success, None on any failure.
     """
-    ...
+    assert camera in ["L", "R"], "The camera is given by 'L' or 'R'"
+    if camera == "L":
+        kpt_src = p.uL_prev
+    if camera == "R":
+        kpt_src = p.uR_prev
 
-
-def stereo_promote(p: Point, image_other: MatLike,
-                   calib: dict, alg: dict
-                   ) -> cv.KeyPoint | None:
-    """Mono-to-stereo: `p` has only one camera populated at frame k.
-    Attempt NCC match in the other camera along the epipolar line.
-
-    Returns the matched cv.KeyPoint or None. Caller fills the empty slot
-    (uL_curr or uR_curr) on `p` if successful — vision.py does not mutate
-    Point objects.
-    """
-    ...
+    cands = candidate_set(p, delta_T, Sigma_xi, dt, calib, alg, camera)
+    if len(cands) != 0:
+        cand = ssd_coarse_match(image_src, image_dst, kpt_src, cands, calib, alg)
+        cand.keypoint = lk_refine(image_src, image_dst, kpt_src, cand.keypoint, alg)
+        passed = fb_check(image_src, image_dst, kpt_src, cand.keypoint, alg)
+        if passed:
+            return cand
+        
+    return None

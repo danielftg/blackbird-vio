@@ -17,7 +17,7 @@ Set membership defines role; points themselves are role-agnostic.
 from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterator, Optional
+from typing import Iterator, Optional, Callable
 import cv2 as cv
 import numpy as np
 
@@ -73,8 +73,12 @@ class StateType(Enum):
 
 @dataclass
 class Point:
-    """One tracked point across two consecutive pair of frames."""
+    """One tracked 3D point across two consecutive frame pairs.
 
+    Field population varies by role:
+      - F (EKF features)         : pixels only; 3D state lives in EKF
+      - F_pre (candidates), I    : pixels + 3D state from solver
+    """
     # ---- identity --------------------------------------------------------
     id: int                                    # globally unique
     n: int = 0                                 # age in frames since birth
@@ -230,6 +234,14 @@ class PointSet:
             point.roll()
 
     # ---- queries ---------------------------------------------------------
+    def get(self, pid) -> Point:
+        """Return a point by id.
+
+        Raises:
+            KeyError: if the point id is not present.
+        """
+        return self._points[pid]
+
     def ids(self) -> set[int]:
         """All currently-held point ids."""
         return set(self._points.keys())
@@ -247,10 +259,10 @@ class PointSet:
                 result.add(point)
 
         return result 
-        ...
-
+        
+        
     # ---- bulk transfer ---------------------------------------------------
-    def move_to(self, other: "PointSet", pids: set[int]) -> None:
+    def move_to(self, other: PointSet, pids: set[int]) -> None:
         """Move points by id from this set to another.
 
         Example:
@@ -278,7 +290,33 @@ class PointSet:
             point = self.remove(pid)
             other.add(point)
 
+    def union(self, *others: PointSet) -> PointSet:
+        """Return a new PointSet containing all points from self and `others`.
 
+        Points are shared by reference — mutating a Point through the returned
+        set is visible in the original sets. If the same id appears in multiple
+        sets, the *first* occurrence wins (sets are processed left-to-right
+        starting with self); subsequent duplicates are silently skipped.
+
+        Args:
+            *others: any number of additional PointSets to union with self.
+
+        Returns:
+            A new PointSet whose points are references into self and `others`.
+            The returned set is independent in the sense that adding/removing
+            points from it does not affect the inputs — but mutating shared
+            Points does.
+        """
+        out = PointSet(name=f"{self.name}")
+        for p in self:
+            out._points[p.id] = p
+        for other in others:
+            out.name = f"{out.name} U {other.name}"
+            for p in other:
+                if p.id not in out:
+                    out._points[p.id] = p
+        return out
+    
 # =============================================================================
 # Module-level helpers
 # =============================================================================

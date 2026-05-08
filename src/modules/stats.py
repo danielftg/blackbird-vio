@@ -42,9 +42,8 @@ def chi2_threshold(alpha: float, dof: int) -> float:
 
 def feature_nis_gate(ekf: Ekf,
                      F_set: PointSet,
-                     z: dict[int, jnp.ndarray],
                      alg: dict
-                     ) -> tuple[set[int], dict[int, float]]:
+                     ) -> tuple[[int], dict[int, float]]:
     """Per-feature normalised innovation squared (NIS) gate.
 
     For each feature i in F_set, computes:
@@ -56,22 +55,19 @@ def feature_nis_gate(ekf: Ekf,
     rejects stationarity if γ_i > χ²_{α_NIS, ν_i}.
 
     Args:
-        ekf   : filter state, exposes h_pixels, get_measurement_jacobian,
-                covariance, get_measurement_noise.
-        F_set : EKF feature set
-        z     : per-id observed pixels (stacked per Point in id-order
-                consistent with ekf.h_pixels).
-
+        ekf   : filter state, exposes get_fp_px for ŷ_i and  S_i 
+        F_set : EKF feature set, has z_i
+       
     Returns:
-        (rejected_ids, gammas) — set of point ids that failed, plus γ_i
+        (rejected_ids, gammas) — list of point ids that failed, plus γ_i
         per id (used by joint_consistency without recomputation).
     """
-    ...
+    ekf.get_fp_px
+
 
 
 def joint_consistency(inlier_ids: set[int],
                       gammas: dict[int, float],
-                      F_set: PointSet,
                       alg: dict
                       ) -> bool:
     """Joint χ² test on the inlier set after per-feature gating.
@@ -103,10 +99,12 @@ def admission_velocity_gate(F_pre: PointSet,
 
     Args:
         F_pre    : candidate-feature set (pre-admission)
-     
+        
     Returns:
         (admit_ids, reject_ids) — partition of F_pre by test outcome.
         Caller moves admit set → F (and augments into EKF), reject set → I.
 
     """
+    """Reads each Point's v_curr (3-vec for SS/SM/MS, scalar for MM)
+    and Sigma_curr (6x6 or 4x4 for MM) directly from the PointSet."""
     ...

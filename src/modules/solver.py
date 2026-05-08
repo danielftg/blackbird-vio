@@ -22,7 +22,7 @@ import jax.numpy as jnp
 import jaxlie
 
 from .points import Point, PointSet, PixelType
-
+from .vision import CandidateSample
 
 # =============================================================================
 # Joint state container
@@ -82,7 +82,7 @@ class Solver:
                    points: PointSet,
                    delta_T_prior: jaxlie.SE3,
                    Sigma_prior: jnp.ndarray,
-                   search_inits: dict[int, tuple[jnp.ndarray, jnp.ndarray]]
+                   search_inits: dict[int, CandidateSample]
                    ) -> None:
         """Build the JointState from F_pre U I and the EKF pose prior.
 
@@ -91,9 +91,12 @@ class Solver:
                  information enters via the pose prior).
         delta_T_prior, Sigma_prior : §eq:DeltaXi_prior. Used as both the
                  prior factor and the initial guess for ΔT.
-        search_inits : per-id (p_init, v_init) from the search step
-                 (§sec:search_region). v_init is a 3-vector for full
-                 velocity types or a scalar for MM.
+        search_inits: One of 1,2 depending on available info.  
+                1: per-id (p_Bkm1, v_p)
+                2: per-id (p__Bk,  v_p)  (Transport p_Bk to p_Bkm1)
+                From (§sec:search_region). Used as initial guess.
+                Let v_p is a 3-vector for full velocity types 
+                or a scalar for MM (Use magnitude).
 
         Filters points by PixelType — points that don't
         produce a valid solver correspondence are skipped.
@@ -110,7 +113,7 @@ class Solver:
         d_perp required only for MM."""
         ...
 
-    def h_point(self, s_i: jnp.ndarray, corr: CorrType,
+    def h_point(self, s_i: jnp.ndarray, corr: PixelType,
                 delta_T: jaxlie.SE3, dt: float,
                 d_perp: jnp.ndarray | None = None) -> jnp.ndarray:
         """Stacked pixel projection for one point at (k-1, k) per its
@@ -118,7 +121,7 @@ class Solver:
         Returns a (ν_i,) array."""
         ...
 
-    def J_point(self, s_i: jnp.ndarray, corr: CorrType,
+    def J_point(self, s_i: jnp.ndarray, corr: PixelType,
                 delta_T: jaxlie.SE3, dt: float,
                 d_perp: jnp.ndarray | None = None
                 ) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -168,11 +171,12 @@ class Solver:
         ΔT block populated by Σ_prior^{-1/2} and the residual computed
         as Σ_prior^{-1/2} · (ΔT̂_EKF ⊖ ΔT^t).
         """
+        
         ...
 
     # ---- iteration -------------------------------------------------------
 
-    def step(self, x: JointState, z: dict[int, jnp.ndarray]) -> jnp.ndarray:
+    def step(self, x: JointState) -> jnp.ndarray:
         """One GN iteration: build normal equations, solve, return τ.
         Caller applies the increment via apply_increment.
         """
@@ -184,8 +188,7 @@ class Solver:
         onto ΔT, vector-add τ_si onto each s_i."""
         ...
 
-    def run(self, z: dict[int, jnp.ndarray]
-            ) -> tuple[JointState, jnp.ndarray]:
+    def run(self) -> tuple[JointState, jnp.ndarray]:
         """Iterate GN to convergence. Returns (x_post, Σ_x_post) where
         Σ_x_post = (AᵀA)^{-1} at the final iterate (§Covariance at
         convergence).
@@ -214,9 +217,8 @@ class Solver:
     # ---- output assembly -------------------------------------------------
 
     def write_back(self, x_Bk: JointState, Sigma_Bk: jnp.ndarray,
-                   F_pre: PointSet, I_set: PointSet) -> None:
-        """Write per-point (p_curr, v_curr, Σ_curr) and pose-point
-        cross-covariances back onto the corresponding Point objects in
-        F_pre and I_set, in B_k coordinates.
+                   points:PointSet) -> None:
+        """Write per-point (p_curr, v_curr, Σ_curr) back onto the corresponding Point objects in
+        points, in curr slots.
         """
         ...

@@ -7,6 +7,7 @@ Implements the pseudocode in §sec:algorithm_overview as a single class.
 
 from __future__ import annotations
 from dataclasses import dataclass
+from itertools import chain
 import numpy as np
 import jax.numpy as jnp
 import jaxlie
@@ -15,15 +16,14 @@ import cv2 as cv
 import utils as util
 from .points  import Point, PointSet, PixelType, IdSource
 from .vision  import (
-    detect_keypoints,
+    detect_keypoints, CandidateSample,
     grid_select_features, focus_select_interest,
     stereo_match, reconstruct_depth,
-    temporal_match_one, stereo_promote,
-)
-from .ekf     import Ekf, EkfState
+    temporal_match_one, temporal_match_one_feature,
+    )
+from .ekf     import Ekf, EkfState, relative_pose
 from .solver  import Solver, JointState, CorrType
 from .stats   import feature_nis_gate, joint_consistency, admission_velocity_gate
-from .utils   import relative_pose
 from cv2.typing import MatLike
 
 
@@ -80,7 +80,8 @@ class Algo:
         self.id_gen = IdSource()
         self.calib = util.load_yaml("modules/constants/calibration.yaml")
         self.alg = util.load_yaml("modules/constants/algorithm.yaml")
-
+        self.solvr = Solver(self.calib, self.alg)
+       
     # =====================================================================
     # First frame — Initialise (k = 0) per pseudocode
     # =====================================================================
@@ -106,7 +107,7 @@ class Algo:
         calib = self.calib
         alg = self.alg 
 
-        accum.t_prev = t_0
+        accum.t_prev = t_0 
         accum.focus_prev = F_init
         accum.focus_sigma_prev = sigma_F_init
         accum.L_prev = L_0
@@ -199,99 +200,227 @@ class Algo:
              ) -> IterOutput:
         """One iteration (§Pseudocode "Iterate"). Sub-steps below; this
         method is the orchestration shell."""
+        accum = self.accum
+        calib = self.calib
+        alg = self.alg 
 
         # ---- Receive and propagate ---------------------------------------
-        # dt = t_k - t_{k-1}; EKF predict with u_{k-1}; detect on (L_k, R_k).
-        ...
-
+        delta_t = t_k - accum.t_prev
+        prop_state_matrix = accum.EKF.propagate(u_km1, delta_t)
+        key_L = detect_keypoints(L_k, calib, alg)
+        key_R = detect_keypoints(R_k, calib, alg)
+        
         # ---- Pre-update relative pose ------------------------------------
         # Compute (ΔT⁻, Σ_Δξ⁻) from T̂_{k-1}^+ and T̂_k^- using P_pose_joint^-.
-        # Used as prior for search regions if EKF coasts.
-        ...
+        T_a = accum.X_prev.T 
+        T_b = accum.EKF.state.T
+        covar_a = accum.P_prev[:6, :6]
+        covar_b = accum.EKF.covariance[:6, :6]
+        relation_matrix = prop_state_matrix
+
+        delta_T, covar_delta_T = relative_pose(
+            T_a, T_b
+            ,covar_a, covar_b,
+            relation_matrix
+        )
 
         # ---- Search and track --------------------------------------------
-        # For each point with u^{k-1} populated: candidate set → SSD coarse
-        # → LK refine → forward-backward check. Failures: drop from I,
-        # marginalise from F. Solver-init metadata cached per surviving
-        # point (the winning candidate's (ΔT, p, v) sample).
-        ...
-
+        # For each point with u^{k-1} populated: 
+        # candidate set -> Predict → SSD coarse → LK refine → forward-backward check. 
+        # Failures: drop from I, marginalise from F. 
+        # Solver-init metadata cached per surviving point (the winning candidate's (ΔT, p, v) sample).
+        
+        w_cands = self._search_and_track(L_k, R_k,
+                          delta_T,
+                          covar_delta_T, delta_t
+        )
+        
         # ---- Stereo promotion --------------------------------------------
-        # Mono points at k that are flanked by stereo neighbours: attempt
+        # Attempt stereo promotion for mono points. 
         # NCC in the other camera; fill the empty slot in u^k.
-        ...
+        for p_set in [accum.I, accum.F_pre, accum.F]:
+            mono_L = p_set.filter(lambda p: p.uR_curr is None)
+            mono_R = p_set.filter(lambda p: p.uL_curr is None)
+
+            if len(mono_L) != 0:
+                self._stereo_promote(L_k, R_k,
+                mono_L,
+                calib, alg,
+                "L→R"
+                )
+
+            if len(mono_R) != 0:
+                self._stereo_promote(R_k, L_k,
+                mono_R,
+                calib, alg,
+                "R→L"
+                )
 
         # ---- EKF update --------------------------------------------------
-        # Assemble feature measurements for F. If |F| < N_F^min: coast.
-        # Else: NIS gate → joint consistency → update on inliers + gravity
-        # pseudo-measurement. Failures move F → I.
-        ...
+        upd_state_matrix = self._ekf_update()
+
 
         # ---- Post-update relative pose -----------------------------------
-        # Compute (ΔT⁺, Σ_Δξ⁺) from T̂_{k-1}^+ and T̂_k^+. If coasting,
-        # reuse the pre-update version. Pass into the joint solver.
-        ...
+        # Compute (ΔT⁺, Σ_Δξ⁺) from T̂_{k-1}^+ and T̂_k^+. 
+        
+        T_b = accum.EKF.state.T
+        covar_b = accum.EKF.covariance[:6, :6]
+        relation_matrix = upd_state_matrix @ prop_state_matrix
+
+        delta_T, covar_delta_T = relative_pose(
+            T_a, T_b
+            ,covar_a, covar_b,
+            relation_matrix
+        )
+
 
         # ---- Joint solver ------------------------------------------------
         # Stage-2 points in F_pre ∪ I: classify CorrType, solve with the
         # post-update pose prior, transport per-point states/covariances
         # to B_k, write back to Point objects.
-        ...
+        sol, sol_covar = self._solve_joint(
+            delta_T, covar_delta_T, w_cands
+        )
+        
 
         # ---- Feature admission -------------------------------------------
         # F_pre points with first stage-2 solve: velocity χ² gate.
         # Pass: augment into EKF (move to F). Fail: move to I.
-        ...
+        self._admit_features()
+        
+        
+        # ---- Replenish ------------------------------------------------
+        I_hit_limit, F_hit_limit = self._replenish(L_k, R_k, key_L, key_R, F_km1, sigma_F_km1)     
 
-        # ---- Focus update ------------------------------------------------
-        # If focus changed: drop interest points outside new focus,
-        # select replacements from the keypoint pool, NCC stereo match.
-        ...
-
-        # ---- Housekeeping ------------------------------------------------
-        # Retire points past n_max; pre-emptive replenish for points that
-        # would retire next frame; replenish F_pre / I from the keypoint
-        # pool; stage-1 stereo triangulation for new stereo points.
-        ...
 
         # ---- Output ------------------------------------------------------
         # Strip feature rows from EKF state/covariance for X_core / P_core.
         # Assemble C_k from the three sources (F via EKF, F_pre/I via
         # solver, stage-1 stereo via disparity).
         # Roll accumulator k → k-1.
-        ...
+        out = self._emit_and_roll(sol.delta_T, sol_covar[:6, :6])
+        
+        
+        # ---- Housekeeping  ------------------------------------------------
+        # If focus changed: drop interest points outside new focus. #NOTE: Implement when focus changes.
+        accum.t_prev = t_k
+        accum.focus_prev = F_km1
+        accum.focus_sigma_prev = sigma_F_km1
+        accum.L_prev = L_k
+        accum.R_prev = R_k
+        accum.X_prev = accum.EKF.state
+        accum.P_prev = accum.EKF.covariance
+
+        to_drop = list(I_hit_limit.ids())
+        for id in to_drop: self.accum.I.discard(id)
+        to_drop = list(F_hit_limit.ids())
+        for id in to_drop: 
+            self.accum.F.discard(id)
+            self.accum.EKF.marginalise(id)
+
+        return out
 
     # =====================================================================
     # Helpers (each one block of the pseudocode)
     # =====================================================================
     # The methods below are private; iter() calls them in order.
 
-    def _propagate(self, u_km1: jnp.ndarray, dt: float) -> jnp.ndarray:
-        """EKF propagate. Returns Φ for joint pose covariance assembly."""
-        ...
-
-    def _detect(self, L_k: MatLike, R_k: MatLike
-                ) -> tuple[list, list]:
-        """FAST + Shi-Tomasi on both images. Returns (pool_L, pool_R)."""
-        ...
 
     def _search_and_track(self, L_k: MatLike, R_k: MatLike,
-                          delta_T_minus: jaxlie.SE3,
-                          Sigma_xi_minus: jnp.ndarray, dt: float
-                          ) -> dict[int, "CandidateSample"]:
+                          delta_T: jaxlie.SE3,
+                          Sigma_xi: jnp.ndarray, dt: float
+                          ) -> dict[int, CandidateSample]:
         """Temporal match all points with u^{k-1}; return solver-init
         samples per surviving id. Failures dropped/marginalised here."""
-        ...
+        cands = {}
+        for point in chain(self.accum.I, self.accum.F_pre):
+            cand_L, cand_R = self.st_point(point,"I", L_k, R_k, delta_T, Sigma_xi, dt, self.calib, self.alg)
+            point.uL_curr = cand_L.keypoint if cand_L is not None else None
+            point.uR_curr = cand_R.keypoint if cand_R is not None else None            
+            cands[point.id] = cand_L if cand_R is None else cand_R
 
-    def _stereo_promote(self, L_k: MatLike, R_k: MatLike) -> None:
+        no_match = [id for id,c in cands.items() if c is None]
+        
+        for point in self.accum.F:
+            cand_L, cand_R = self.st_point(point,"F", L_k, R_k, delta_T, Sigma_xi, dt, self.calib, self.alg)
+            point.uL_curr = cand_L.keypoint if cand_L is not None else None
+            point.uR_curr = cand_R.keypoint if cand_R is not None else None  
+            cands[point.id] = cand_L if cand_R is None else cand_R
+
+            if (point.uL_curr is None) and (point.uR_curr is None):
+                no_match.append(point.id) 
+        
+        for id in no_match: 
+            if id in self.accum.I:
+                self.accum.I.discard(id)
+                continue
+            if id in self.accum.F_pre:
+                self.accum.F_pre.discard(id)
+                continue
+            if id in self.accum.F:
+                self.accum.F.discard(id)
+                self.accum.EKF.marginalise(id)
+        return cands 
+
+    def _stereo_promote(self, 
+                        image_src: MatLike, image_dst: MatLike,
+                        points_src: PointSet,
+                        calib: dict, alg: dict,
+                        direction: str = "L→R") -> None:
         """Attempt mono → stereo for newly-tracked mono points."""
-        ...
+        assert direction in ["L→R", "R→L"], "Direction is given by 'L→R' or 'R→L'"
+        
+        points_list = list(points_src)       
+        if direction == "L→R":
+            keypoints_src = [p.uL_curr for p in points_list]
+        else:
+            keypoints_src = [p.uR_curr for p in points_list]
+        
+        matches = stereo_match(image_src, image_dst, 
+                               keypoints_src, calib, alg, direction
+        )
+        
+        for idx, p in enumerate(points_list):
+            if direction == "L→R":
+                p.uR_curr = matches[idx]
+            else:
+                p.uL_curr = matches[idx]
 
-    def _ekf_update(self) -> tuple[bool, jnp.ndarray, jnp.ndarray]:
-        """Run NIS gate, joint consistency, EKF update + gravity.
-        Returns (coasting, K, H). coasting=True if |F| < N_F^min or joint
-        consistency failed; in that case K, H are None."""
+    def _ekf_update(self) -> jnp.ndarray:
+        """Run NIS gate, joint consistency, EKF update.
+        Returns I-KH."""
         ...
+        
+        accum = self.accum
+        alg = self.alg
+        any_points = lambda F: len(F) != 0
+        
+        accum.EKF.add_gravity_measurement()
+        if any_points(accum.F):
+            moving, gammas = feature_nis_gate(accum.EKF, accum.F, alg)
+
+            for id in moving:
+                accum.EKF.marginalise(id)
+                p = accum.F.remove(id)
+                accum.I.add(p)
+            
+            if any_points(accum.F):
+                stationary = joint_consistency(
+                    accum.F.ids(), gammas, alg
+                )
+                if not stationary:
+                    to_drop = list(accum.F.ids())
+                    for id in to_drop:
+                        accum.EKF.marginalise(id)
+                        p = accum.F.remove(id)
+                        accum.I.add(p)
+                else:
+                    accum.EKF.add_pixel_measurements(accum.F)
+        
+
+        upd_state_matrix = accum.EKF.update()
+        return upd_state_matrix
+
 
     def _solve_joint(self, delta_T_prior: jaxlie.SE3,
                      Sigma_prior: jnp.ndarray,
@@ -299,36 +428,143 @@ class Algo:
                      ) -> tuple[JointState, jnp.ndarray]:
         """Run the joint Gauss-Newton solver, transport to B_k, write
         back to Points. Returns (x_post in B_k, Σ_post in B_k)."""
-        ...
+        all_pts = self.accum.I.union(self.accum.F_pre)
+        solvr = self.solvr
 
-    def _admit_features(self, x_post: JointState,
-                        Sigma_post: jnp.ndarray) -> None:
+        solvr.initialise(all_pts, delta_T_prior, Sigma_prior, init_samples)
+        sol, sol_covar = solvr.run()     
+        sol, sol_covar = solvr.transport_to_Bk(sol, sol_covar)
+        solvr.write_back(sol, sol_covar, all_pts)
+        return sol, sol_covar 
+
+    def _admit_features(self) -> None:
         """Velocity gate on F_pre points with first solve. Move passes
         to F (augment EKF), fails to I."""
-        ...
 
-    def _update_focus(self, F_k: np.ndarray, sigma_F_k: float,
-                      L_k: MatLike, R_k: MatLike,
-                      pool_L: list, pool_R: list) -> None:
-        """If focus changed: drop outside-focus interests, select new
-        ones from the pool with NCC stereo match."""
-        ...
+        admit_ids, reject_ids = admission_velocity_gate(self.accum.F_pre, self.alg)
+        self.accum.F_pre.move_to(self.accum.F, admit_ids)
+        self.accum.F_pre.move_to(self.accum.I, reject_ids)
+        for id in admit_ids: self.accum.EKF.augment(self.accum.F.get(id))
 
-    def _housekeeping(self, L_k: MatLike, R_k: MatLike,
-                      pool_L: list, pool_R: list) -> None:
-        """Retire/replenish points; stage-1 stereo for new stereo pairs."""
-        ...
+    def _replenish(self, L_k: MatLike, R_k: MatLike,
+                      pool_L: list, pool_R: list
+                      ,F_km1: np.ndarray, sigma_F_km1: float
+                      ) -> tuple[PointSet, PointSet]:
+        """Replenish points; stage-1 stereo for new stereo pairs.
+           Returns points which hit the lifetime limit this frame per pointset.
+           Left is I, right is F.
+        """
+        
+        # Replenish  F / I from the keypoint pools. Bring them up to max
+        # Pre-emptive replenish for points that would retire next frame. (Draw above max) 
+        # NCC stereo match. 
+        # stage-1 stereo triangulation for new stereo points.
+        
+        focus_changed = (not np.allclose(self.accum.focus_prev, F_km1)) or (not np.isclose(self.accum.focus_sigma_prev, sigma_F_km1))
+        
+        N_I = len(self.accum.I)
+        N_F = len(self.accum.F)
+        
+        N_I_max = self.alg["cv"]["N_I_max"]
+        N_F_max = self.alg["cv"]["N_F_max"]
+        lifespan_max = self.alg["cv"]["n_max"]
+
+        hits_limit = lambda p: p.n + 1 == lifespan_max
+        hit_limit = lambda p: p.n == lifespan_max
+
+        I_hits_limit = self.accum.I.filter(hits_limit) 
+        F_hits_limit = self.accum.F.filter(hits_limit)
+        
+        I_hit_limit = self.accum.I.filter(hit_limit)
+        F_hit_limit = self.accum.F.filter(hit_limit)
+        
+        I_pre_empt = len(I_hits_limit)        
+        F_pre_empt = len(F_hits_limit)
+
+        I_ign = len(I_hit_limit)
+        F_ign = len(F_hit_limit)
+        
+        N_I_repl = N_I_max - (N_I - I_ign) + I_pre_empt 
+        N_F_repl = N_F_max - (N_F - F_ign) + F_pre_empt
+
+        
+
+        if (N_I_repl > 0) and (not focus_changed):
+            all_pts = self.accum.I.union(self.accum.F)
+            I_L = focus_select_interest(pool_L, F_km1, sigma_F_km1, all_pts, self.calib, self.alg, "L")
+            I_R = focus_select_interest(pool_R, F_km1, sigma_F_km1, all_pts, self.calib, self.alg, "R")
+
+            I_m_L_R = stereo_match(
+                image_src=L_k, image_dst=R_k,
+                keypoints_src=I_L,
+                calib=self.calib, alg=self.alg,
+                direction="L→R"
+            ) 
+            I_m_R_L = stereo_match(
+                    image_src=R_k, image_dst=L_k,
+                    keypoints_src=I_R,
+                    calib=self.calib, alg=self.alg,
+                    direction="R→L"
+            )
+
+            #Build non-duplicate matches
+            I_kpts = [(I_L[idx],m) for idx, m in I_m_L_R]
+            I_kpts.extend([(m,I_R[idx]) for idx, m in I_m_R_L])
+            I_kpts = self._dedupe(I_kpts)
+
+            I_kpts.sort(key=lambda p: p[0] is None or p[1] is None)
+            for j, kp_pair  in enumerate(I_kpts):
+                if j >= N_I_repl:
+                    break
+                id = self.id_gen.next()
+                self.accum.I.add(Point(id, uL_curr=kp_pair[0], uR_curr=kp_pair[1]))
+            
+            self.accum.I = reconstruct_depth(self.accum.I, self.calib)
+        
+
+        if focus_changed:
+            raise NotImplementedError("focus change handling not yet implemented")
+
+        if N_F_repl > 0:
+            all_pts = self.accum.I.union(self.accum.F)
+            F_L = grid_select_features(pool_L, all_pts, self.calib, self.alg, "L") 
+            F_R = grid_select_features(pool_R, all_pts, self.calib, self.alg, "R")
+            
+            F_m_L_R = stereo_match(
+                image_src=L_k, image_dst=R_k,
+                keypoints_src=F_L,
+                calib=self.calib, alg=self.alg,
+                direction="L→R"
+            ) 
+            F_m_R_L = stereo_match(
+                    image_src=R_k, image_dst=L_k,
+                    keypoints_src=F_R,
+                    calib=self.calib, alg=self.alg,
+                    direction="R→L"
+            ) 
+            F_kpts = [(F_L[idx],m) for idx, m in F_m_L_R]
+            F_kpts.extend([(m,F_R[idx]) for idx, m in F_m_R_L])
+            F_kpts = self._dedupe(F_kpts)
+
+            F_kpts.sort(key=lambda p: p[0] is None or p[1] is None)
+            for j, kp_pair  in enumerate(F_kpts):
+                if j >= N_F_repl:
+                    break
+                id = self.id_gen.next()
+                self.accum.F_pre.add(Point(id, uL_curr=kp_pair[0], uR_curr=kp_pair[1]))
+        
+            self.accum.F_pre = reconstruct_depth(self.accum.F_pre, self.calib)
+
+        return (I_hit_limit, F_hit_limit)
+
+
 
     def _emit_and_roll(self, delta_T_solver: jaxlie.SE3,
                          Sigma_DeltaXi: jnp.ndarray) -> IterOutput:
         """Strip feature rows for X_core/P_core; build point cloud
-        list with per-point (id, role, stage, p, v, Σ). Roll point sets k -> k-1!"""
+        list with per-point (id, role, stage, p, v, Σ). THEN roll point sets k -> k-1!"""
         ...
 
-    def _roll_accumulator(self) -> None:
-        """End-of-iteration: roll all PointSets (k → k-1), shuffle
-        images and timestamps, sync EKF feature reps to Points."""
-        ...
     
     def _kpt_key(self, kp: cv.KeyPoint) -> tuple[int, int]:
         """Round to integer pixels for hashable identity."""
@@ -356,5 +592,39 @@ class Algo:
             seen.add(k)
             out.append(p)
         return out
+    
+    def st_point(self, point:Point, pset, L_k, R_k, delta_T, covar_delta_T, delta_t, calib, alg):
+        had_L = point.uL_prev is not None
+        had_R = point.uR_prev is not None
+        cand_L, cand_R = None, None 
+        if had_L:
+            cand_L = self.st_point_cam(point, pset, L_k, delta_T, covar_delta_T, delta_t, calib, alg, "L")
+        if had_R:
+            cand_R = self.st_point_cam(point, pset, R_k, delta_T, covar_delta_T, delta_t, calib, alg, "R")
 
+        return (cand_L, cand_R)
 
+    def st_point_cam(self, point:Point, pset:str, image_dst, delta_T, covar_delta_T, delta_t, calib, alg, camera:str):
+        assert pset in ["I", "F"], "The point set is given by 'I' or 'F'"
+        assert camera in ["L", "R"], "The camera is given by 'L' or 'R'"
+
+        if camera == "L":
+            image_src = self.accum.L_prev    
+        if camera == "R":
+            image_src = self.accum.R_prev
+
+        if pset=="I":
+            return temporal_match_one(
+            point, image_src, image_dst, delta_T, 
+            covar_delta_T, delta_t, calib, alg,
+            camera
+            )
+        if pset =="F":
+            p_Bk, sigma = self.accum.EKF.get_fp_body(point.id)
+            return  temporal_match_one_feature(
+            point, image_src, image_dst, 
+            p_Bk, sigma, calib, alg,
+            camera 
+            )
+
+    

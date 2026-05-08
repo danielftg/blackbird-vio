@@ -47,6 +47,29 @@ def project_point(p_B: jnp.ndarray, calib: dict, camera: str) -> jnp.ndarray:
     """
     ...
 
+def relative_pose(T_a: jaxlie.SE3, T_b: jaxlie.SE3,
+                  covar_a: jnp.ndarray, covar_b: jnp.ndarray,
+                  relation_matrix: jnp.ndarray
+                  ) -> tuple[jaxlie.SE3, jnp.ndarray]:
+    """Relative pose Δ = T_b T_a⁻¹ and its 6x6 covariance.
+
+    Args:
+        T_a, T_b        : SE(3) endpoints (e.g. T̂_{k-1}^+ and T̂_k^-, or
+                          T̂_{k-1}^+ and T̂_k^+).
+        covar_a         : 6x6 pose covariance at T_a, P^a_{ξξ}.
+        covar_b         : 6x6 pose covariance at T_b, P^b_{ξξ}.
+        relation_matrix : 6x6 matrix linking the pose tangents at the two
+                          endpoints. Two cases.
+                            - Pre-update join (§eq:183):
+                            - Post-update join (§eq:187):
+
+    Returns:
+        (ΔT, Σ_Δξ) where:
+            ΔT     = T_b T_a⁻¹ ∈ SE(3)
+            Σ_Δξ   = J P_joint Jᵀ ∈ R^{6x6}
+    """
+    ...
+
 
 # =============================================================================
 # State container
@@ -182,10 +205,10 @@ class Ekf:
         ...
 
 
-    def update(self) -> tuple[jnp.ndarray, jnp.ndarray]:
+    def update(self) -> jnp.ndarray:
         """Apply all staged measurements in a single Kalman update.
 
-        Returns (K, H) for the staged measurements. Needed for the post-update
+        Returns I-KH for the staged measurements. Needed for the post-update
         cross-covariance (I - K H) Φ P^{k-1,+} in the joint pose-pose block
         (§eq:187).
         """
@@ -207,8 +230,8 @@ class Ekf:
         """
         ...
 
-    def marginalise(self, p: Point) -> None:
-        """Remove p from the EKF state.
+    def marginalise(self, id: int) -> None:
+        """Remove point with the id from the EKF state.
 
         Deletes the corresponding 3 rows/columns from X̂ and P. No
         information loss for remaining states.
@@ -223,33 +246,17 @@ class Ekf:
     @property
     def covariance(self) -> jnp.ndarray: ...
 
-    def pose_prior(self) -> tuple[jaxlie.SE3, jaxlie.SE3, jnp.ndarray]:
-        """(T̂_{k-1}^+, T̂_k^-, P_pose,joint^{12×12}) for the solver's pose
-        prior factor (§eq:187).
+    def get_fp_body(self, id) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """In body frame: Retrieve and return the feature point 'id' from the current state.
+        Also return its 3x3 covariance.
         """
         ...
+    def get_fp_px(self, id, camera:str) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """In camere frame: Retrieve and return the feature point 'id' from the current state.
+        Project point and covariance into the given camera. Return the pixel and 2x2 covariance.
+        """
 
     def feature_output(self) -> tuple[jnp.ndarray, jnp.ndarray, list[int]]:
-        """(p_F, P_FF, ids) — EKF feature points emitted directly to output,
-        bypassing the joint solver to avoid double-counting (the EKF's
-        feature info enters the solver via the pose prior).
-        """
-        ...
-
-    def relative_pose(T_a: jaxlie.SE3, T_b: jaxlie.SE3,
-                  P_joint: jnp.ndarray
-                  ) -> tuple[jaxlie.SE3, jnp.ndarray]:
-        """Relative pose Δ = T_b T_a⁻¹ and its 6x6 covariance.
-
-        Args:
-            T_a, T_b : SE(3) endpoints (e.g. T̂_{k-1}^+ and T̂_k^-, or both ^+).
-            P_joint  : 12x12 joint covariance over (δξ_a, δξ_b) — block (183)
-                    pre-update or block (187) post-update.
-
-        Returns:
-            (ΔT, Σ_Δξ) where Σ_Δξ = J P_joint Jᵀ with
-                J = [-Ad_{ΔT}, I_6]
-            the 6x12 Jacobian of the right-perturbation tangent of ΔT
-            w.r.t. (δξ_a, δξ_b).
+        """(p_F, P_FF, ids) — All EKF feature points and their 3x3 covariance.
         """
         ...
