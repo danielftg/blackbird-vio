@@ -64,8 +64,8 @@ def main() -> None:
         fetch_vid.main()
 
     # ---- load config ---------------------------------------------------
-    alg = util.load_yaml("modules/constants/algorithm.yaml")
-    calib = util.load_yaml("modules/constants/calibration.yaml")
+    alg = util.load_yaml("constants/algorithm.yaml")
+    calib = util.load_yaml("constants/calibration.yaml")
     
     # ---- load preprocessed data -----------------------------------------
     motor = pd.read_csv(args.data / "motor_data.csv")
