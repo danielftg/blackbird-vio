@@ -85,31 +85,56 @@ def project_point(p_B: jnp.ndarray, calib: dict, camera: str) -> jnp.ndarray:
 
 def relative_pose(T_a: jaxlie.SE3, T_b: jaxlie.SE3,
                   covar_a: jnp.ndarray, covar_b: jnp.ndarray,
-                  state_matrix: jnp.ndarray, update_matrix: jnp.ndarray=None,
-                  a_ids:list[int]=None, b_ids:list[int]=None,
+                  state_matrix: jnp.ndarray,
+                  update_matrix: jnp.ndarray = None,
+                  a_ids: list = None, b_ids: list = None,
                   ) -> tuple[jaxlie.SE3, jnp.ndarray]:
-    """Relative pose Δ = T_b T_a⁻¹ and its 6x6 covariance.
-
-    Args:
-        T_a, T_b        : SE(3) endpoints (e.g. T̂_{k-1}^+ and T̂_k^-, or
-                          T̂_{k-1}^+ and T̂_k^+).
-        covar_a         : Full covariance of EKF state at k-1.
-        covar_b         : Full covariance of EKF state at k.
-        state_matrix    : Propogation matrix of the state covariance.
-        update_matrix   : Update matrix of the state covariance. 
-        a_ids           : Feature ids in state at k-1 (Only needed when update_matrix is given)
-        b_ids           : Feature ids in state at k   (Only needed when update_matrix is given)
-    Returns:
-        (ΔT, Σ_Δξ) where:
-            ΔT     = T_b T_a⁻¹ ∈ SE(3)
-            Σ_Δξ   = J P_joint Jᵀ ∈ R^{6x6}
+    """Relative pose Δ = T_b T_a⁻¹ and 6x6 covariance.
+ 
+    Args
+    ----
+    T_a, T_b        : SE(3) endpoints (T̂_{k-1}^+ and T̂_k^- or T̂_k^+).
+    covar_a         : full covariance at k-1, shape (n_a, n_a).
+    covar_b         : full covariance at k,   shape (n_b, n_b).
+    state_matrix    : Φ_{k-1} = I + dt·F, shape (n_a, n_a).
+    update_matrix   : (I - K_k H_k), shape (n_b, n_b). Pass None for
+                      pre-update.
+    a_ids, b_ids    : feature-id ordering at k-1 and at k. Required for
+                      post-update; used to map surviving rows of Φ P^{k-1,+}
+                      to the (possibly smaller) post-marginalisation dim.
+ 
+    Returns
+    -------
+    (ΔT, Σ_Δξ).
     """
-
-    #Two cases.
-    #- Pre-update join (§eq:183):
-    #- Post-update join (§eq:187):
-    ...
-
+    delta_T = T_b @ T_a.inverse()
+ 
+    PhiPa = state_matrix @ covar_a              # (n_a, n_a)
+ 
+    if update_matrix is None:
+        cross = PhiPa[:6, :6]                   # eq 183
+    else:
+        assert a_ids is not None and b_ids is not None, \
+            "post-update path requires a_ids and b_ids"
+        rows = list(range(18))
+        for fid in b_ids:
+            i_a = a_ids.index(fid)
+            rows.extend([18 + 3*i_a + j for j in range(3)])
+        rows = jnp.asarray(rows)
+        PhiPa_sliced = PhiPa[rows, :]           # (n_b, n_a)
+        cross = (update_matrix @ PhiPa_sliced)[:6, :6]    # eq 187
+ 
+    Caa = covar_a[:6, :6]
+    Cbb = covar_b[:6, :6]
+    P_joint = jnp.block([[Caa,    cross.T],
+                         [cross,  Cbb    ]])
+ 
+    Ad = T_a.adjoint()
+    J  = jnp.concatenate([-Ad, Ad], axis=1)     # (6, 12)
+    Sigma_DeltaXi = J @ P_joint @ J.T
+    Sigma_DeltaXi = 0.5 * (Sigma_DeltaXi + Sigma_DeltaXi.T)
+    return delta_T, Sigma_DeltaXi
+ 
 
 # =============================================================================
 # State container
