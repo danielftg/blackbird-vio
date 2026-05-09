@@ -6,14 +6,14 @@ Implements the pseudocode in §sec:algorithm_overview as a single class.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import chain
 import numpy as np
 import jax.numpy as jnp
 import jaxlie
 import cv2 as cv 
 
-import utils as util
+from .utils   import load_yaml
 from .points  import Point, PointSet, PixelType, IdSource
 from .vision  import (
     detect_keypoints, CandidateSample,
@@ -21,7 +21,7 @@ from .vision  import (
     stereo_match, reconstruct_depth,
     temporal_match_one, temporal_match_one_feature,
     )
-from .ekf     import Ekf, EkfState, relative_pose
+from .ekf     import Ekf, CoreEkfState, EkfState, relative_pose
 from .solver  import Solver, JointState, CorrType
 from .stats   import feature_nis_gate, joint_consistency, admission_velocity_gate
 from cv2.typing import MatLike
@@ -34,14 +34,14 @@ from cv2.typing import MatLike
 @dataclass
 class Accumulator:
     """Algorithm's internal state (§sec:algorithm_overview)."""
-    F:                  PointSet=PointSet("Feature points")
-    I:                  PointSet=PointSet("Interest points")
-    F_pre:              PointSet=PointSet("Feature points. Pre admission.")
+    F:                  PointSet=field(default_factory=lambda: PointSet("Feature points"))
+    I:                  PointSet=field(default_factory=lambda: PointSet("Interest points"))
+    F_pre:              PointSet=field(default_factory=lambda: PointSet("Feature points. Pre admission."))
     L_prev:             MatLike=None
     R_prev:             MatLike=None
-    X_prev:             EkfState=None
     EKF:                Ekf=None
-    P_prev:             jnp.ndarray=None
+    X_prev:             CoreEkfState=None
+    P_prev:             jnp.ndarray=None #18x18
     focus_prev:         np.ndarray=None
     focus_sigma_prev:   float=None 
     t_prev:             float=None 
@@ -54,12 +54,21 @@ class Accumulator:
 @dataclass
 class IterOutput:
     """One frame's worth of estimator output (§sec:alg_io)."""
-    X_core:         EkfState                     # core state, no features
+    X_core:         CoreEkfState                 # core state, no features
     P_core:         jnp.ndarray                  # (18, 18)
     delta_T_solver: jaxlie.SE3                   # solver pose change
     Sigma_DeltaXi:  jnp.ndarray                  # (6, 6)
-    point_cloud:    list[tuple]                  # see assemble_point_cloud
+    point_cloud:    dict[int, CloudPoint]        # see assemble_point_cloud
 
+
+@dataclass
+class CloudPoint:
+    role: str             # 'F', 'F_pre', 'I'
+    stage: int            # '-1', '-2'. -1 is stage 1 and -2 is stage2.
+    p: np.ndarray         # (3,)
+    v: np.ndarray | None  # None  for stage1, (3,)  for stage2
+    Sigma: np.ndarray     # (3,3) for stage1, (6,6) or (4,4) 
+                          # for stage2 depending on correspondance type
 
 # =============================================================================
 # Algorithm
@@ -78,8 +87,8 @@ class Algo:
         """
         self.accum = Accumulator()
         self.id_gen = IdSource()
-        self.calib = util.load_yaml("modules/constants/calibration.yaml")
-        self.alg = util.load_yaml("modules/constants/algorithm.yaml")
+        self.calib = load_yaml("modules/constants/calibration.yaml")
+        self.alg = load_yaml("modules/constants/algorithm.yaml")
         self.solvr = Solver(self.calib, self.alg)
        
     # =====================================================================
@@ -180,8 +189,8 @@ class Algo:
         accum.F_pre = reconstruct_depth(accum.F_pre, calib)
     
         accum.EKF = Ekf(calib)
-        accum.X_prev = accum.EKF.state
-        accum.P_prev = accum.EKF.covariance 
+        accum.X_prev = accum.EKF.state.get_core_state()
+        accum.P_prev = accum.EKF.covariance[:18,:18]
 
         delta_T = jaxlie.SE3.identity()
         Sigma_DeltaXi = jnp.zeros((6,6))
@@ -308,8 +317,8 @@ class Algo:
         accum.focus_sigma_prev = sigma_F_km1
         accum.L_prev = L_k
         accum.R_prev = R_k
-        accum.X_prev = accum.EKF.state
-        accum.P_prev = accum.EKF.covariance
+        accum.X_prev = accum.EKF.state.get_core_state()
+        accum.P_prev = accum.EKF.covariance[:18,:18]
 
         to_drop = list(I_hit_limit.ids())
         for id in to_drop: self.accum.I.discard(id)
@@ -334,7 +343,7 @@ class Algo:
         samples per surviving id. Failures dropped/marginalised here."""
         cands = {}
         for point in chain(self.accum.I, self.accum.F_pre):
-            cand_L, cand_R = self.st_point(point,"I", L_k, R_k, delta_T, Sigma_xi, dt, self.calib, self.alg)
+            cand_L, cand_R = self._st_point(point,"I", L_k, R_k, delta_T, Sigma_xi, dt, self.calib, self.alg)
             point.uL_curr = cand_L.keypoint if cand_L is not None else None
             point.uR_curr = cand_R.keypoint if cand_R is not None else None            
             cands[point.id] = cand_L if cand_R is None else cand_R
@@ -342,7 +351,7 @@ class Algo:
         no_match = [id for id,c in cands.items() if c is None]
         
         for point in self.accum.F:
-            cand_L, cand_R = self.st_point(point,"F", L_k, R_k, delta_T, Sigma_xi, dt, self.calib, self.alg)
+            cand_L, cand_R = self._st_point(point,"F", L_k, R_k, delta_T, Sigma_xi, dt, self.calib, self.alg)
             point.uL_curr = cand_L.keypoint if cand_L is not None else None
             point.uR_curr = cand_R.keypoint if cand_R is not None else None  
             cands[point.id] = cand_L if cand_R is None else cand_R
@@ -424,7 +433,7 @@ class Algo:
 
     def _solve_joint(self, delta_T_prior: jaxlie.SE3,
                      Sigma_prior: jnp.ndarray,
-                     init_samples: dict[int, "CandidateSample"]
+                     init_samples: dict[int, CandidateSample]
                      ) -> tuple[JointState, jnp.ndarray]:
         """Run the joint Gauss-Newton solver, transport to B_k, write
         back to Points. Returns (x_post in B_k, Σ_post in B_k)."""
@@ -487,7 +496,9 @@ class Algo:
         N_I_repl = N_I_max - (N_I - I_ign) + I_pre_empt 
         N_F_repl = N_F_max - (N_F - F_ign) + F_pre_empt
 
-        
+        if focus_changed:
+            raise NotImplementedError("focus change handling not yet implemented")
+
 
         if (N_I_repl > 0) and (not focus_changed):
             all_pts = self.accum.I.union(self.accum.F)
@@ -521,10 +532,6 @@ class Algo:
             
             self.accum.I = reconstruct_depth(self.accum.I, self.calib)
         
-
-        if focus_changed:
-            raise NotImplementedError("focus change handling not yet implemented")
-
         if N_F_repl > 0:
             all_pts = self.accum.I.union(self.accum.F)
             F_L = grid_select_features(pool_L, all_pts, self.calib, self.alg, "L") 
@@ -557,13 +564,63 @@ class Algo:
 
         return (I_hit_limit, F_hit_limit)
 
+    def _assemble_point_cloud(self) -> dict[int, CloudPoint]:
+        """Build per-frame point cloud C_k from all three sources (§sec:alg_io).
+
+        Source priority — each point appears exactly once:
+            F           : (p, Σ_p) from EKF state. Position only.
+            F_pre, I    : (p, v, Σ) from joint solver, transported to B_k.
+                        Value depends on correspondance type.
+            F_pre, I    : (p, Σ_p) from reconstruct_depth.
+
+        Returns:
+            Dict of Cloudpoint id:(role, stage, p, v, Σ). 
+        """
+        cloud = {}
+
+        # F — EKF feature points
+        p_F, P_FF, ids_F = self.accum.EKF.feature_output()
+        for i, pid in enumerate(ids_F):
+            cloud[pid] = CloudPoint(
+                role="F",
+                stage=-1,
+                p=p_F[i],
+                v=None,
+                Sigma=P_FF[i],
+            )
+            
+        # F_pre and I — solver output (stage-2) or stereo triangulation (stage-1)
+        for role, pset in (('F_pre', self.accum.F_pre), ('I', self.accum.I)):
+            for p in pset:
+                if p.p_curr is None:
+                    continue
+                stage = -2 if p.v_curr is not None else -1
+                cloud[p.id]= CloudPoint(
+                    role=role,
+                    stage=stage,
+                    p=p.p_curr,
+                    v=p.v_curr,
+                    Sigma=p.Sigma_curr,
+                )
+        return cloud
 
 
     def _emit_and_roll(self, delta_T_solver: jaxlie.SE3,
                          Sigma_DeltaXi: jnp.ndarray) -> IterOutput:
         """Strip feature rows for X_core/P_core; build point cloud
         list with per-point (id, role, stage, p, v, Σ). THEN roll point sets k -> k-1!"""
-        ...
+        
+        out = IterOutput(
+            X_core = self.accum.EKF.state.get_core_state(),
+            P_core=self.accum.EKF.covariance[:18,:18],
+            delta_T_solver=delta_T_solver,
+            Sigma_DeltaXi=Sigma_DeltaXi,
+            point_cloud=self._assemble_point_cloud(),
+        )
+        self.accum.F.roll()
+        self.accum.I.roll()
+        self.accum.F_pre.roll()
+        return out 
 
     
     def _kpt_key(self, kp: cv.KeyPoint) -> tuple[int, int]:
@@ -593,18 +650,18 @@ class Algo:
             out.append(p)
         return out
     
-    def st_point(self, point:Point, pset, L_k, R_k, delta_T, covar_delta_T, delta_t, calib, alg):
+    def _st_point(self, point:Point, pset, L_k, R_k, delta_T, covar_delta_T, delta_t, calib, alg):
         had_L = point.uL_prev is not None
         had_R = point.uR_prev is not None
         cand_L, cand_R = None, None 
         if had_L:
-            cand_L = self.st_point_cam(point, pset, L_k, delta_T, covar_delta_T, delta_t, calib, alg, "L")
+            cand_L = self._st_point_cam(point, pset, L_k, delta_T, covar_delta_T, delta_t, calib, alg, "L")
         if had_R:
-            cand_R = self.st_point_cam(point, pset, R_k, delta_T, covar_delta_T, delta_t, calib, alg, "R")
+            cand_R = self._st_point_cam(point, pset, R_k, delta_T, covar_delta_T, delta_t, calib, alg, "R")
 
         return (cand_L, cand_R)
 
-    def st_point_cam(self, point:Point, pset:str, image_dst, delta_T, covar_delta_T, delta_t, calib, alg, camera:str):
+    def _st_point_cam(self, point:Point, pset:str, image_dst, delta_T, covar_delta_T, delta_t, calib, alg, camera:str):
         assert pset in ["I", "F"], "The point set is given by 'I' or 'F'"
         assert camera in ["L", "R"], "The camera is given by 'L' or 'R'"
 

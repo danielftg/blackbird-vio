@@ -137,14 +137,53 @@ def main() -> None:
         )
 
 
-def serialize_output(k: int, t_k_ns: int, output:algo.IterOutput) -> dict:
+def serialize_output(k: int, t_k_ns: int, output: algo.IterOutput) -> dict:
     """Flatten one IterOutput into a flat dict for DataFrame storage.
-    (timestamp_ns, pose, v_B, ω_B, plus optional diagnostics)
-    (timestamp_ns,x,y,z,qx,qy,qz,qw,vx,vy,vz,wx,wy,wz,...)
-    Disturbance/gravity-body included for diagnostics.
-    """
-    ...   
 
+    Per-frame columns:
+        k, timestamp_ns, timestamp_s
+        x, y, z, qx, qy, qz, qw                 — pose T_{B_k, B_0}
+        vx, vy, vz                              — body-frame linear velocity
+        wx, wy, wz                              — body-frame angular velocity
+        gx, gy, gz                              — body-frame gravity
+        dx, dy, dz                              — body-frame disturbance
+        n_F, n_F_pre, n_I                       — point-set sizes
+
+    Point cloud not serialised here — too large for one CSV row. Persist
+    separately if needed (per-frame parquet keyed by k).
+    """
+    X = output.X_core
+    t = X.T.translation()                  # (3,) jnp / np array
+    q = X.T.rotation().as_quaternion_xyzw()  # (4,) qx qy qz qw
+
+    # Coerce to plain Python floats so pandas writes scalars, not array reprs
+    t = np.asarray(t).flatten()
+    q = np.asarray(q).flatten()
+    v = np.asarray(X.v).flatten()
+    w = np.asarray(X.omega).flatten()
+    g = np.asarray(X.g_B).flatten()
+    d = np.asarray(X.d_B).flatten()
+
+    # Count by role from the cloud
+    roles = [cp.role for cp in output.point_cloud.values()]
+    n_F     = roles.count("F")
+    n_F_pre = roles.count("F_pre")
+    n_I     = roles.count("I")
+
+    return {
+        "k":            k,
+        "timestamp_ns": t_k_ns,
+        "timestamp_s":  t_k_ns * 1e-9,
+        "x":  float(t[0]), "y":  float(t[1]), "z":  float(t[2]),
+        "qx": float(q[0]), "qy": float(q[1]), "qz": float(q[2]), "qw": float(q[3]),
+        "vx": float(v[0]), "vy": float(v[1]), "vz": float(v[2]),
+        "wx": float(w[0]), "wy": float(w[1]), "wz": float(w[2]),
+        "gx": float(g[0]), "gy": float(g[1]), "gz": float(g[2]),
+        "dx": float(d[0]), "dy": float(d[1]), "dz": float(d[2]),
+        "n_F":     n_F,
+        "n_F_pre": n_F_pre,
+        "n_I":     n_I,
+    }
 
 if __name__ == "__main__":
     main()

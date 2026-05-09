@@ -76,21 +76,33 @@ def relative_pose(T_a: jaxlie.SE3, T_b: jaxlie.SE3,
 # =============================================================================
 
 @dataclass
-class EkfState:
-    """Mean of X = ⟨T, v, ω, g^B, d^B, p_1^B, ..., p_{N_f}^B⟩."""
+class CoreEkfState:
+    """Mean of X = ⟨T, v, ω, g^B, d^B"""
     T:       jaxlie.SE3                                  # T_{B_k, B_0}
     v:       jnp.ndarray                                 # (3,)
     omega:   jnp.ndarray                                 # (3,)
     g_B:     jnp.ndarray                                 # (3,)
     d_B:     jnp.ndarray                                 # (3,)
+    
+
+
+@dataclass
+class EkfState(CoreEkfState):
+    """Mean of X = ⟨T, v, ω, g^B, d^B, p_1^B, ..., p_{N_f}^B⟩."""
     p_F:     jnp.ndarray                                 # (N_f, 3); rows aligned with feature_ids
     feature_ids: list[int] = field(default_factory=list) # ids matching p_F rows
 
     def dim(self) -> int:
         """Tangent dimension: 6 + 3·4 + 3·N_f = 18 + 3 N_f."""
         ...
-
-
+    def get_core_state(self) -> CoreEkfState:
+        return CoreEkfState(
+            T=self.T,
+            v=self.v,
+            omega=self.omega,
+            g_B=self.g_B,
+            d_B=self.d_B,
+        )
 # =============================================================================
 # EKF
 # =============================================================================
@@ -256,7 +268,10 @@ class Ekf:
         Project point and covariance into the given camera. Return the pixel and 2x2 covariance.
         """
 
-    def feature_output(self) -> tuple[jnp.ndarray, jnp.ndarray, list[int]]:
-        """(p_F, P_FF, ids) — All EKF feature points and their 3x3 covariance.
+    def feature_output(self) -> tuple[list[jnp.ndarray], list[jnp.ndarray], list[int]]:
+        """Returns (p_F, Σ_per_point, ids) where:
+            p_F : (N_f, 3) positions
+            Σ_per_point : (N_f, 3, 3) per-feature marginal covariances
+            ids : list of N_f point ids
         """
         ...
