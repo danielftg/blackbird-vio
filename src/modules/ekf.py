@@ -16,9 +16,11 @@ calibration.yaml. No hardcoded values.
 
 from __future__ import annotations
 from dataclasses import dataclass, field
+from jax.scipy.linalg import block_diag
 import jax.numpy as jnp
 import jax
 import jaxlie
+
 
 from .points import Point, PointSet
 
@@ -153,7 +155,7 @@ class CoreEkfState:
 @dataclass
 class EkfState(CoreEkfState):
     """Mean of X = ⟨T, v, ω, g^B, d^B, p_1^B, ..., p_{N_f}^B⟩."""
-    p_F:     jnp.ndarray                                 # (N_f, 3); rows aligned with feature_ids
+    p_F:     jnp.ndarray = None                          # (N_f, 3); rows aligned with feature_ids
     feature_ids: list[int] = field(default_factory=list) # ids matching p_F rows
 
     def dim(self) -> int:
@@ -167,6 +169,8 @@ class EkfState(CoreEkfState):
             g_B=self.g_B,
             d_B=self.d_B,
         )
+    
+
 # =============================================================================
 # EKF
 # =============================================================================
@@ -186,7 +190,55 @@ class Ekf:
 
     def __init__(self, calib: dict) -> None:
         """Bootstrap. calib = parsed calibration.yaml."""
-        ...
+        self.calib = calib
+        
+        init_x = calib["ekf_sys"]["init_state"]
+
+        #Initial state
+        self.X = EkfState(
+            T=jaxlie.SE3.exp(jnp.asarray(init_x["pose"])),
+            v=jnp.asarray(init_x["lin_vel"]),
+            omega=jnp.asarray(init_x["ang_vel"]),
+            g_B=jnp.asarray(init_x["grav"]),
+            d_B=jnp.asarray(init_x["dist"])
+        )
+
+        init_p = calib["ekf_sys"]["init_covar"]
+        
+        #Initial state covariance
+        self.P = block_diag(
+            jnp.diag(jnp.asarray(init_p["var_pose"])),
+            jnp.diag(jnp.asarray(init_p["var_lin_vel"])), 
+            jnp.diag(jnp.asarray(init_p["var_ang_vel"])), 
+            jnp.diag(jnp.asarray(init_p["var_grav"])), 
+            jnp.diag(jnp.asarray(init_p["var_dist"]))
+        )
+        
+        #Gravity parameter
+        self.g =  calib["ekf_meas"]["g_norm"]
+        sys_noise = calib["ekf_sys"]["covar"]
+        
+        #Continuous time Process noise spectral density
+        self.Q_c = block_diag(
+            jnp.diag(jnp.asarray(sys_noise["var_act"])), 
+            jnp.diag(jnp.asarray(sys_noise["var_ang_vel"])), 
+            jnp.diag(jnp.asarray(sys_noise["var_grav"])), 
+            jnp.diag(jnp.asarray(sys_noise["var_dist"]))
+        )
+        
+        meas_noise = calib["ekf_meas"]["covar"]
+        self.var_px = meas_noise["var_px"] 
+        self.var_g = meas_noise["var_g"]
+       
+      
+        self.T_LB = jaxlie.SE3.from_matrix(jnp.asarray(
+            calib["camera_extrinsics"]["left"]["cog_cam"])
+        )
+        self.T_RB = jaxlie.SE3.from_matrix(jnp.asarray(
+            calib["camera_extrinsics"]["right"]["cog_cam"])
+        )
+        
+       
 
     # ---- system model: f and its derivatives -----------------------------
 
@@ -317,10 +369,12 @@ class Ekf:
     # ---- outputs ---------------------------------------------------------
 
     @property
-    def state(self) -> EkfState: ...
+    def state(self) -> EkfState:
+        return self.X
 
     @property
-    def covariance(self) -> jnp.ndarray: ...
+    def covariance(self) -> jnp.ndarray:
+        return self.P
 
     def get_fp_body(self, id) -> tuple[jnp.ndarray, jnp.ndarray]:
         """In body frame: Retrieve and return the feature point 'id' from the current state.
