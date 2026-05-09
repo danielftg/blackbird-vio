@@ -39,8 +39,8 @@ class Accumulator:
     L_prev:             MatLike=None
     R_prev:             MatLike=None
     EKF:                Ekf=None
-    X_prev:             CoreEkfState=None
-    P_prev:             jnp.ndarray=None #18x18
+    X_prev:             EkfState=None
+    P_prev:             jnp.ndarray=None 
     focus_prev:         np.ndarray=None
     focus_sigma_prev:   float=None 
     t_prev:             float=None 
@@ -188,8 +188,8 @@ class Algo:
         accum.F_pre = reconstruct_depth(accum.F_pre, calib)
     
         accum.EKF = Ekf(calib)
-        accum.X_prev = accum.EKF.state.get_core_state()
-        accum.P_prev = accum.EKF.covariance[:18,:18]
+        accum.X_prev = accum.EKF.state
+        accum.P_prev = accum.EKF.covariance
 
         delta_T = jaxlie.SE3.identity()
         Sigma_DeltaXi = jnp.zeros((6,6))
@@ -222,14 +222,13 @@ class Algo:
         # Compute (ΔT⁻, Σ_Δξ⁻) from T̂_{k-1}^+ and T̂_k^- using P_pose_joint^-.
         T_a = accum.X_prev.T 
         T_b = accum.EKF.state.T
-        covar_a = accum.P_prev[:6, :6]
-        covar_b = accum.EKF.covariance[:6, :6]
-        relation_matrix = prop_state_matrix
+        covar_a = accum.P_prev
+        covar_b = accum.EKF.covariance
 
         delta_T, covar_delta_T = relative_pose(
             T_a, T_b
             ,covar_a, covar_b,
-            relation_matrix
+            prop_state_matrix
         )
 
         # ---- Search and track --------------------------------------------
@@ -272,13 +271,13 @@ class Algo:
         # Compute (ΔT⁺, Σ_Δξ⁺) from T̂_{k-1}^+ and T̂_k^+. 
         
         T_b = accum.EKF.state.T
-        covar_b = accum.EKF.covariance[:6, :6]
-        relation_matrix = upd_state_matrix @ prop_state_matrix
-
+        covar_b = accum.EKF.covariance
+        
         delta_T, covar_delta_T = relative_pose(
             T_a, T_b
             ,covar_a, covar_b,
-            relation_matrix
+            prop_state_matrix, upd_state_matrix,
+            accum.X_prev.feature_ids, accum.EKF.feature_ids
         )
 
 
@@ -316,8 +315,8 @@ class Algo:
         accum.focus_sigma_prev = sigma_F_km1
         accum.L_prev = L_k
         accum.R_prev = R_k
-        accum.X_prev = accum.EKF.state.get_core_state()
-        accum.P_prev = accum.EKF.covariance[:18,:18]
+        accum.X_prev = accum.EKF.state
+        accum.P_prev = accum.EKF.covariance
 
         to_drop = list(I_hit_limit.ids())
         for id in to_drop: self.accum.I.discard(id)
