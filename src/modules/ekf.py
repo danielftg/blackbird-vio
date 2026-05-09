@@ -17,6 +17,7 @@ calibration.yaml. No hardcoded values.
 from __future__ import annotations
 from dataclasses import dataclass, field
 import jax.numpy as jnp
+import jax
 import jaxlie
 
 from .points import Point, PointSet
@@ -42,10 +43,45 @@ def project_point(p_B: jnp.ndarray, calib: dict, camera: str) -> jnp.ndarray:
         single input, (N, 2) for a batch.
 
     Raises:
-        ValueError if camera is not "L" or "R", or if a point lies on or
-        behind the focal plane (z_c <= 0) — caller should pre-filter.
+        AssertionError if camera is not "L" or "R"
     """
-    ...
+    assert camera in ["L", "R"], "Camera must be one of 'L' or 'R'"
+    
+    if camera == "L":
+        T_cb = calib["camera_extrinsics"]["left"]["cog_cam"]
+        dist_coeff = calib["camera_intrinsics"]["left"]["dist_coeff"]
+        k_matrix = calib["camera_intrinsics"]["left"]["k_matrix"]
+
+    else:
+        T_cb = calib["camera_extrinsics"]["right"]["cog_cam"]
+        dist_coeff = calib["camera_intrinsics"]["right"]["dist_coeff"]
+        k_matrix = calib["camera_intrinsics"]["right"]["k_matrix"]
+   
+    # Distortion guard
+    dist_coeff = jnp.asarray(dist_coeff)                # (4,)
+    if jnp.any(dist_coeff != 0.0):
+        raise NotImplementedError("Non-zero distortion coefficients are not supported.")
+   
+    T_cb = jaxlie.SE3.from_matrix(jnp.asarray(T_cb))
+    k_matrix = jnp.asarray(k_matrix)                    # 3x3
+
+    # Normalise to batch shape (N, 3)
+    single = (p_B.ndim == 1)
+    if single:
+        p_B  = p_B[None, :]                              # (1, 3)
+
+    # 1. Rigid body → camera frame  (SE3 acts on points directly)
+    p_c = jax.vmap(T_cb.apply)(p_B)                    # (N, 3)
+
+   
+    # 2. Homogenize → K·[I|0]·p̃_c → dehomogenize
+    ones = jnp.ones((p_c.shape[0], 1))
+    p_h  = jnp.concatenate([p_c, ones], axis=-1)       # (N, 4)
+    P    = k_matrix @ jnp.eye(3, 4)                    # (3, 4)
+    uv_h = (P @ p_h.T).T                               # (N, 3)
+    uv   = uv_h[:, :2] / uv_h[:, 2:3]                 # (N, 2)
+    return uv  
+
 
 def relative_pose(T_a: jaxlie.SE3, T_b: jaxlie.SE3,
                   covar_a: jnp.ndarray, covar_b: jnp.ndarray,

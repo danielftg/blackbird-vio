@@ -155,13 +155,13 @@ camera_intrinsics:
 camera_extrinsics:
   baseline: 0.05                         # [m] [P Tab II]
   left:
-    com_cam:                           # T_LB ∈ SE(3): pose from B to L
+    cog_cam:                           # T_LB ∈ SE(3): pose from B to L
       - [0.0, 1.0, 0.0,   0.0175]
       - [0.0, 0.0, 1.0,   0.020505]
       - [1.0, 0.0, 0.0,  -0.1844]
       - [0.0, 0.0, 0.0,   1.0]
   right:
-    com_cam:                           # T_RB ∈ SE(3): pose from B to R
+    cog_cam:                           # T_RB ∈ SE(3): pose from B to R
       - [0.0, 1.0, 0.0,  -0.0325]
       - [0.0, 0.0, 1.0,   0.020505]
       - [1.0, 0.0, 0.0,  -0.1844]
