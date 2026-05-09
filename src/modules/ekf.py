@@ -49,25 +49,29 @@ def project_point(p_B: jnp.ndarray, calib: dict, camera: str) -> jnp.ndarray:
 
 def relative_pose(T_a: jaxlie.SE3, T_b: jaxlie.SE3,
                   covar_a: jnp.ndarray, covar_b: jnp.ndarray,
-                  relation_matrix: jnp.ndarray
+                  state_matrix: jnp.ndarray, update_matrix: jnp.ndarray=None,
+                  a_ids:list[int]=None, b_ids:list[int]=None,
                   ) -> tuple[jaxlie.SE3, jnp.ndarray]:
     """Relative pose Δ = T_b T_a⁻¹ and its 6x6 covariance.
 
     Args:
         T_a, T_b        : SE(3) endpoints (e.g. T̂_{k-1}^+ and T̂_k^-, or
                           T̂_{k-1}^+ and T̂_k^+).
-        covar_a         : 6x6 pose covariance at T_a, P^a_{ξξ}.
-        covar_b         : 6x6 pose covariance at T_b, P^b_{ξξ}.
-        relation_matrix : 6x6 matrix linking the pose tangents at the two
-                          endpoints. Two cases.
-                            - Pre-update join (§eq:183):
-                            - Post-update join (§eq:187):
-
+        covar_a         : Full covariance of EKF state at k-1.
+        covar_b         : Full covariance of EKF state at k.
+        state_matrix    : Propogation matrix of the state covariance.
+        update_matrix   : Update matrix of the state covariance. 
+        a_ids           : Feature ids in state at k-1 (Only needed when update_matrix is given)
+        b_ids           : Feature ids in state at k   (Only needed when update_matrix is given)
     Returns:
         (ΔT, Σ_Δξ) where:
             ΔT     = T_b T_a⁻¹ ∈ SE(3)
             Σ_Δξ   = J P_joint Jᵀ ∈ R^{6x6}
     """
+
+    #Two cases.
+    #- Pre-update join (§eq:183):
+    #- Post-update join (§eq:187):
     ...
 
 
@@ -77,14 +81,13 @@ def relative_pose(T_a: jaxlie.SE3, T_b: jaxlie.SE3,
 
 @dataclass
 class CoreEkfState:
-    """Mean of X = ⟨T, v, ω, g^B, d^B"""
+    """Mean of X = ⟨T, v, ω, g^B, d^B⟩."""
     T:       jaxlie.SE3                                  # T_{B_k, B_0}
     v:       jnp.ndarray                                 # (3,)
     omega:   jnp.ndarray                                 # (3,)
     g_B:     jnp.ndarray                                 # (3,)
     d_B:     jnp.ndarray                                 # (3,)
     
-
 
 @dataclass
 class EkfState(CoreEkfState):
@@ -185,7 +188,8 @@ class Ekf:
     def get_measurement_noise(self, F_set: PointSet) -> jnp.ndarray:
         """Measurement noise R for the staged measurements (§eq:R + R_g if
         gravity staged). Block-diagonal, σ_px² weights from calibration.yaml,
-        sized by visibility per point in F_set."""
+        sized by visibility per point in F_set.
+        """
         ...
 
     # ---- continuous propagation -----------------------------------------
@@ -195,7 +199,7 @@ class Ekf:
 
         Returns the discrete state-transition matrix Φ_{k-1} = I + dt·F,
         needed for the joint pose-pose covariance across the propagation step
-        (§eq:183, the (Φ P^{k-1,+})_ξξ block).
+        (§eq:183, the (Φ P^{k-1,+})_ξξ block).     
         """
         ...
 
