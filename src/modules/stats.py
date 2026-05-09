@@ -62,7 +62,8 @@ def feature_nis_gate(ekf: Ekf,
         (rejected_ids, gammas) — list of point ids that failed, plus γ_i
         per id (used by joint_consistency without recomputation).
     """
-    ekf.get_fp_px
+    ekf.get_fp_px #Gives ŷ_i and S_i
+    F_set # Has y_i
 
 
 
@@ -75,8 +76,7 @@ def joint_consistency(inlier_ids: set[int],
     γ_joint = Σ_{i ∈ S} γ_i  ~  χ²_{Σ ν_i}.
 
     Returns True if the inlier set is jointly consistent (γ_joint 
-    cutoff), False otherwise. False ⇒ pipeline coasts and triggers
-    emergency replenishment per the algorithm pseudocode.
+    cutoff), False otherwise.
     """
     ...
 
@@ -102,9 +102,8 @@ def admission_velocity_gate(F_pre: PointSet,
         
     Returns:
         (admit_ids, reject_ids) — partition of F_pre by test outcome.
-        Caller moves admit set → F (and augments into EKF), reject set → I.
-
+       
     """
-    """Reads each Point's v_curr (3-vec for SS/SM/MS, scalar for MM)
+    """Reads each Point's v_curr (3-vec, maginitude is scalar for MM)
     and Sigma_curr (6x6 or 4x4 for MM) directly from the PointSet."""
     ...

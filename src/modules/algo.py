@@ -203,7 +203,7 @@ class Algo:
     def iter(self,
              L_k: MatLike, R_k: MatLike,
              t_k: float,
-             u_km1: jnp.ndarray,
+             u_km1: np.ndarray,
              F_km1: np.ndarray, sigma_F_km1: float
              ) -> IterOutput:
         """One iteration (§Pseudocode "Iterate"). Sub-steps below; this

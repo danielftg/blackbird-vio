@@ -26,7 +26,7 @@ from .points import Point, PointSet
 # Shared functions
 # =============================================================================
 def project_point(p_B: jnp.ndarray, calib: dict, camera: str) -> jnp.ndarray:
-    """Project a body-frame point into camera `camera` ∈ {"L", "R"}.
+    """Project a body-frame point into camera  ∈ {"L", "R"}.
 
         û = π(R_cB · p_B + t_c)
 
@@ -220,6 +220,10 @@ class Ekf:
         """Stage the ‖g^B‖² = g² pseudo-measurement (§eq:h_gravity)."""
         ...
 
+    def get_gain(self) -> jnp.ndarray:
+        """Kalman gain for the currently staged measurements (§eq:49).
+        """
+        ...
 
     def update(self) -> jnp.ndarray:
         """Apply all staged measurements in a single Kalman update.
@@ -227,11 +231,6 @@ class Ekf:
         Returns I-KH for the staged measurements. Needed for the post-update
         cross-covariance (I - K H) Φ P^{k-1,+} in the joint pose-pose block
         (§eq:187).
-        """
-        ...
-
-    def get_gain(self) -> jnp.ndarray:
-        """Kalman gain for the currently staged measurements (§eq:49).
         """
         ...
 
@@ -269,7 +268,8 @@ class Ekf:
         ...
     def get_fp_px(self, id, camera:str) -> tuple[jnp.ndarray, jnp.ndarray]:
         """In camere frame: Retrieve and return the feature point 'id' from the current state.
-        Project point and covariance into the given camera. Return the pixel and 2x2 covariance.
+        Project point and covariance (H_i P⁻ H_iᵀ + R_i) into the given camera. Return the pixel and 2x2 covariance.
+        
         """
 
     def feature_output(self) -> tuple[list[jnp.ndarray], list[jnp.ndarray], list[int]]:
