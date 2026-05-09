@@ -14,8 +14,6 @@ from pathlib import Path
 import logging
 import pandas as pd
 import numpy as np
-import cv2 as cv
-from cv2.typing import MatLike
 
 import modules.utils as util
 import modules.algo as algo
@@ -37,7 +35,6 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-
 def list_image_pairs(data_dir: Path) -> list[tuple[Path, Path]]:
     """Enumerate (left, right) image pairs in chronological order.
 
@@ -54,14 +51,6 @@ def list_image_pairs(data_dir: Path) -> list[tuple[Path, Path]]:
     return list(zip(lefts, rights))
 
 
-def load_image(path: Path) -> MatLike:
-    """Read an image as grayscale uint8."""
-    img = cv.imread(str(path), cv.IMREAD_GRAYSCALE)
-    if img is None:
-        raise RuntimeError(f"failed to read image: {path}")
-    return img
-
-
 def main() -> None:
     args = parse_args()
     logging.basicConfig(
@@ -76,7 +65,8 @@ def main() -> None:
 
     # ---- load config ---------------------------------------------------
     alg = util.load_yaml("modules/constants/algorithm.yaml")
-
+    calib = util.load_yaml("modules/constants/calibration.yaml")
+    
     # ---- load preprocessed data -----------------------------------------
     motor = pd.read_csv(args.data / "motor_data.csv")
     pose  = pd.read_csv(args.data / "body_pose.csv")    # GT, used by eval only
@@ -95,7 +85,7 @@ def main() -> None:
     sigma_F       = float(alg["focus"]["sigma"])
 
     # ---- estimator ------------------------------------------------------
-    estimator = algo.Algo()
+    estimator = algo.Algo(calib, alg)
    
     # ---- prepare results file ------------------------------------------------
     args.results.parent.mkdir(parents=True, exist_ok=True)
@@ -103,8 +93,8 @@ def main() -> None:
         args.results.unlink()                  # fresh start each run
 
     for k, (path_L, path_R) in enumerate(pairs):
-        L = load_image(path_L)
-        R = load_image(path_R)
+        L = util.load_image(path_L)
+        R = util.load_image(path_R)
 
         # timestamp from filename: <prefix>_<idx>_<timestamp_ns>.png
         t_k_ns = int(path_L.stem.split("_")[-1])

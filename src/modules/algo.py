@@ -13,7 +13,6 @@ import jax.numpy as jnp
 import jaxlie
 import cv2 as cv 
 
-from .utils   import load_yaml
 from .points  import Point, PointSet, PixelType, IdSource
 from .vision  import (
     detect_keypoints, CandidateSample,
@@ -81,14 +80,14 @@ class Algo:
     # Construction — wire up internal state
     # =====================================================================
 
-    def __init__(self) -> None:
+    def __init__(self, calib, alg) -> None:
         """Build internal state: empty PointSets, IdSource, EKF, Solver.
         No image processing here — call init() with the first frame.
         """
         self.accum = Accumulator()
         self.id_gen = IdSource()
-        self.calib = load_yaml("modules/constants/calibration.yaml")
-        self.alg = load_yaml("modules/constants/algorithm.yaml")
+        self.calib = calib
+        self.alg = alg
         self.solvr = Solver(self.calib, self.alg)
        
     # =====================================================================

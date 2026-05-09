@@ -2,6 +2,8 @@
 utils.py - Generic functionality 
 """
 from pathlib import Path
+from cv2.typing import MatLike
+import cv2 as cv
 import yaml
 
 
@@ -11,3 +13,11 @@ def load_yaml(path: Path) -> dict:
     """Load a YAML file with explicit UTF-8 encoding (Windows-safe)."""
     with open(path, "r" , encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def load_image(path: Path) -> MatLike:
+    """Read an image as grayscale uint8."""
+    img = cv.imread(str(path), cv.IMREAD_GRAYSCALE)
+    if img is None:
+        raise RuntimeError(f"failed to read image: {path}")
+    return img
