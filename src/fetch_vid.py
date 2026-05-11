@@ -136,12 +136,12 @@ def preprocessing(
 
     # ── Motor: interpolate then apply u_{k-1} lag ─────────────────────────────
     # Pivot to wide format: one row per timestamp, one column per motor
-
+    drn_params = data["drone_parameters"]
     rpm_thr_coeff = [
-    data['rotor_1']['rpm_thr_coeff'],  # m1
-    data['rotor_4']['rpm_thr_coeff'],  # m4 → rotor 2
-    data['rotor_3']['rpm_thr_coeff'],  # m3 → rotor 3
-    data['rotor_2']['rpm_thr_coeff'],  # m2 → rotor 4
+    drn_params['rotor_1']['rpm_thr_coeff'],  # m1
+    drn_params['rotor_4']['rpm_thr_coeff'],  # m4 → rotor 2
+    drn_params['rotor_3']['rpm_thr_coeff'],  # m3 → rotor 3
+    drn_params['rotor_2']['rpm_thr_coeff'],  # m2 → rotor 4
     ]
 
     motor_cols  = ['m1', 'm4', 'm3', 'm2']
