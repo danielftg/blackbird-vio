@@ -4,6 +4,7 @@ utils.py - Generic functionality
 from pathlib import Path
 from cv2.typing import MatLike
 import cv2 as cv
+import jax.numpy as jnp
 import yaml
 
 
@@ -21,3 +22,12 @@ def load_image(path: Path) -> MatLike:
     if img is None:
         raise RuntimeError(f"failed to read image: {path}")
     return img
+
+
+def skew(v: jnp.ndarray) -> jnp.ndarray:
+    """[v]_x : 3-vector → 3x3 skew-symmetric matrix."""
+    return jnp.array([
+        [   0.0, -v[2],  v[1]],
+        [ v[2],    0.0, -v[0]],
+        [-v[1],  v[0],    0.0],
+    ])
