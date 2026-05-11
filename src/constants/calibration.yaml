@@ -185,7 +185,7 @@ ekf_sys:
     pose:    [0.0, 0.0, 0.0,  0.0, 0.0, 0.0]   # se(3) tangent: ρ; φ
     lin_vel: [0.0, 0.0, 0.0]                   # [m/s]   in B
     ang_vel: [0.0, 0.0, 0.0]                   # [rad/s] in B
-    grav:    [0.0, 0.0, 9.81]                  # [m/s^2] FRD: gravity along +z
+    grav:    [0.0, 0.0, 9.7935]                # [m/s^2] FRD: gravity along +z
     dist:    [0.0, 0.0, 0.0]                   # [m/s^2] zero-mean disturbance
 
   # Initial covariance P_0. Diagonal, in same units as state^2.

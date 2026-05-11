@@ -17,6 +17,7 @@ calibration.yaml. No hardcoded values.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from jax.scipy.linalg import block_diag
+from cv2 import KeyPoint
 import jax.numpy as jnp
 import jax
 import jaxlie
@@ -234,6 +235,10 @@ class Ekf:
             calib["camera_extrinsics"]["right"]["cog_cam"])
         )
         
+        #Camera intrinsics
+        self.K_L = jnp.asarray(self.calib["camera_intrinsics"]["left"]["k_matrix"])
+        self.K_R = jnp.asarray(self.calib["camera_intrinsics"]["right"]["k_matrix"])
+        
         # ---- drone params ---------------------------------------------
         plat = self.calib["drone_parameters"]
         self._drone = {}
@@ -257,7 +262,10 @@ class Ekf:
 
         # Augment param
         self.aug_cross_seed = float(self.calib["ekf_sys"]["aug_cross_seed"])
-
+        
+        #For measurement and update
+        self._staged_pixels = None                          
+        self._staged_gravity = False
 
     # ---- system model: f and its derivatives -----------------------------
 
@@ -474,48 +482,118 @@ class Ekf:
         return G
 
     # ---- measurement model: h and its derivatives ------------------------
-    def h(self, F_set: PointSet,
-                v_meas: jnp.ndarray | None = None) -> jnp.ndarray:
-        ...
-        
 
     def h_pixels(self, F_set: PointSet,
                 v_meas: jnp.ndarray | None = None) -> jnp.ndarray:
-        """Stacked pixel-projection measurement (§eq:h_full).
+        """Stacked pixel-projection predictions (§eq:h_full).
 
-        Iterates F_set in id-order, projecting each Point's state-tracked
-        position p_i^B through the relevant camera(s). Visibility (mono /
-        stereo) read from each Point's get_px_type. v_meas=None ⇒ noise-free.
+        For each point in F_set (id-order), project the state-tracked
+        position p_i^B through the relevant camera(s). Visibility from
+        get_px_type. v_meas=None ⇒ noise-free.
         """
-        ...
+        blocks = []
+        for p in self._ordered_features(F_set):
+            i = self.X.feature_ids.index(p.id)
+            p_B = self.X.p_F[i]
+            
+            # Visibility determines L/R/both. Read pixel slots to decide.
+            if p.uL_curr is not None:
+                blocks.append(project_point(p_B, self.calib, "L")[0])
+            if p.uR_curr is not None:
+                blocks.append(project_point(p_B, self.calib, "R")[0])
+        
+        y = jnp.concatenate(blocks) if blocks else jnp.zeros(0)
+        if v_meas is not None:
+            y = y + v_meas
+        return y
+
 
     def h_gravity(self, v_meas: float | None = None) -> float:
-        """Gravity-magnitude pseudo-measurement ‖g^B‖² (§eq:h_gravity).
-        Independent of features."""
-        ...
+        """‖g^B‖² + v_g."""
+        val = float(jnp.dot(self.X.g_B, self.X.g_B))
+        if v_meas is not None:
+            val = val + v_meas
+        return val
+
+    def _proj_jacobian(self, p_B: jnp.ndarray, camera: str) -> jnp.ndarray:
+        """∂π(R_cB·p_B + t_c)/∂p_B for one body-frame point (§eq:H_pi).
+
+        Returns 2x3 matrix. No distortion assumed (rectified images).
+        """
+        assert camera in ["L", "R"], "Camera must be one of 'L' or 'R'"
+        if camera == "L":
+            K = self.K_L
+            T_cb = self.T_LB
+        else:
+            K = self.K_R
+            T_cb = self.T_RB
+         
+        R_cB = T_cb.rotation().as_matrix()
+        t_c  = T_cb.translation()
+
+        p_c = R_cB @ p_B + t_c                            # (3,)
+        z   = p_c[2]
+        fx, fy = K[0, 0], K[1, 1]
+
+        # ∂π/∂p_c = [[fx/z, 0, -fx·x/z²], [0, fy/z, -fy·y/z²]]
+        dpi_dpc = jnp.array([
+            [fx / z, 0.0,    -fx * p_c[0] / (z * z)],
+            [0.0,    fy / z, -fy * p_c[1] / (z * z)],
+        ])                                                # (2, 3)
+
+        return dpi_dpc @ R_cB                             # (2, 3)
 
     def get_measurement_jacobian(self, F_set: PointSet) -> jnp.ndarray:
-        """H_k = Dh/DX about the current mean (§eq:H_full).
+        """H_k for the pixel measurements (§eq:H_full).
 
-        Iterates F_set in the same id-order as h_pixels. 
+        Block-sparse: each feature contributes 2-row (mono) or 4-row (stereo)
+        nonzero only in its p_i^B columns. All other state columns zero.
         """
-        ...
+        n = self.P.shape[0]
+        rows = []
 
-    def get_measurement_noise_jacobian(self, F_set: PointSet) -> jnp.ndarray:
-        """H_v = ∂h/∂v (§eq:Hv).
+        for p in self._ordered_features(F_set):
+            i = self.X.feature_ids.index(p.id)
+            col = 18 + 3 * i
+            p_B = self.X.p_F[i]
+            
+            if p.uL_curr is not None:
+                row = jnp.zeros((2, n))
+                J = self._proj_jacobian(p_B, "L")          # (2, 3)
+                row = row.at[:, col:col+3].set(J)
+                rows.append(row)
+            if p.uR_curr is not None:
+                row = jnp.zeros((2, n))
+                J = self._proj_jacobian(p_B, "R")          # (2, 3)
+                row = row.at[:, col:col+3].set(J)
+                rows.append(row)
 
-        """
-        ...
+        return jnp.concatenate(rows, axis=0) if rows else jnp.zeros((0, n))
+
+    def _H_gravity(self) -> jnp.ndarray:
+        """H_g = [0 | 2 g^Bᵀ | 0] : 1xn, nonzero only in g^B columns."""
+        n = self.P.shape[0]
+        H = jnp.zeros((1, n))
+        return H.at[0, 12:15].set(2.0 * self.X.g_B)
+
 
     # ---- noise covariances (read from calibration.yaml) ------------------
 
 
     def get_measurement_noise(self, F_set: PointSet) -> jnp.ndarray:
-        """Measurement noise R for the staged measurements (§eq:R + R_g if
-        gravity staged). Block-diagonal, σ_px² weights from calibration.yaml,
-        sized by visibility per point in F_set.
+        """R for the staged pixel measurements (§eq:R).
+
+        Block-diagonal σ_px² I, sized by per-point visibility. Each mono
+        point contributes a 2x2 block; each stereo a 4x4.
         """
-        ...
+        rows = []
+        for p in self._ordered_features(F_set):
+            nu = 0
+            if p.uL_curr is not None: nu += 2
+            if p.uR_curr is not None: nu += 2
+            rows.append(self.var_px * jnp.eye(nu))
+        return block_diag(*rows) if rows else jnp.zeros((0, 0))
+
 
     # ---- continuous propagation -----------------------------------------
 
@@ -587,35 +665,135 @@ class Ekf:
         X.p_F = new_p_F
 
     # ---- discrete update: stage then apply -------------------------------
+    def _ordered_features(self, F_set: PointSet) -> list[Point]:
+        """Features that are both in F_set and in EKF state, ordered by EKF
+        feature_ids. Ensures consistency between h, H, R, and the staged
+        observation vector."""
+        return [F_set.get(fid) for fid in self.X.feature_ids
+                if fid in F_set]
+   
+    def _filter_to_state(self, F_set: PointSet) -> PointSet:
+        """Drop points from F_set that aren't in the EKF state (not yet
+        augmented)."""
+        state_ids = set(self.X.feature_ids)
+        return F_set.filter(lambda p: p.id in state_ids)
+
+    def _stack_pixels(self, ordered_pts: list[Point]) -> jnp.ndarray:
+        """Stack observed (u, v) pairs from each point's uL_curr/uR_curr,
+        in the same order as h_pixels would predict."""
+        px = []
+        for p in ordered_pts:
+            if p.uL_curr is not None:
+                px.append(jnp.array([p.uL_curr.pt[0], p.uL_curr.pt[1]]))
+            if p.uR_curr is not None:
+                px.append(jnp.array([p.uR_curr.pt[0], p.uR_curr.pt[1]]))
+        return jnp.concatenate(px) if px else jnp.zeros(0)
 
     def add_pixel_measurements(self, F_set: PointSet) -> None:
         """Stage pixel reprojection terms for the upcoming update.
 
-        Matches state features to F_set entries by Point.id. Points in
-        F_set without a corresponding state entry are ignored (must be
-        augmented first); state entries without an F_set match are
-        skipped this frame (e.g. occluded). Per-point block dim depends
-        on visibility (νᵢ = 2 mono, 4 stereo).
+        Builds the observation vector y_pix from each Point's uL_curr/uR_curr,
+        in the same id-order h_pixels and get_measurement_jacobian use.
+        Points without a state entry (not yet augmented) are filtered out.
         """
-        ...
+        in_state = self._filter_to_state(F_set)
+        y_pix = self._stack_pixels(self._ordered_features(in_state))
+        self._staged_pixels = (in_state, y_pix)
+        
 
     def add_gravity_measurement(self) -> None:
-        """Stage the ‖g^B‖² = g² pseudo-measurement (§eq:h_gravity)."""
-        ...
+        """Stage ‖g^B‖² = g² (§eq:h_gravity)."""
+        self._staged_gravity = True
 
-    def get_gain(self) -> jnp.ndarray:
-        """Kalman gain for the currently staged measurements (§eq:49).
-        """
-        ...
 
     def update(self) -> jnp.ndarray:
         """Apply all staged measurements in a single Kalman update.
 
-        Returns I-KH for the staged measurements. Needed for the post-update
-        cross-covariance (I - K H) Φ P^{k-1,+} in the joint pose-pose block
-        (§eq:187).
+        Builds:
+            y_pred = h(X, 0), stacked over all staged measurement groups
+            y_meas = stacked observations
+            H      = stacked measurement Jacobian
+            H_v    = stacked noise Jacobian
+            R      = stacked measurement noise covariance
+
+        Then applies:
+            innov = y_meas - y_pred
+            K     = P H^T (H P H^T + H_v R H_v^T)^{-1}
+            X    ← X ⊕ K · innov                       (composite manifold)
+            P    ← (I - K H) P
+            
+        Returns (I - K H) for use in the post-update relative-pose cross
+        block (§eq:187).
         """
-        ...
+        assert self._staged_pixels is not None or self._staged_gravity, \
+            "update called with no measurements staged"
+
+        # ---- assemble stacked measurement system -------------------------
+        y_pred_blocks = []
+        y_meas_blocks = []
+        H_blocks      = []
+        R_blocks      = []
+
+        if self._staged_pixels is not None:
+            F_set, y_pix = self._staged_pixels
+            y_pred_blocks.append(self.h_pixels(F_set))
+            y_meas_blocks.append(y_pix)
+            H_blocks.append(self.get_measurement_jacobian(F_set))
+            R_blocks.append(self.get_measurement_noise(F_set))
+
+        if self._staged_gravity:
+            y_pred_blocks.append(jnp.array([self.h_gravity()]))
+            y_meas_blocks.append(jnp.array([self.g ** 2]))
+            H_g = self._H_gravity()                       # (1, n)
+            H_blocks.append(H_g)
+            R_blocks.append(jnp.array([[self.var_g]]))    # (1, 1)
+
+        y_pred = jnp.concatenate(y_pred_blocks)
+        y_meas = jnp.concatenate(y_meas_blocks)
+        H      = jnp.concatenate(H_blocks, axis=0)        # (m, n)
+        R      = block_diag(*R_blocks)                    # (m, m)
+        # H_v = I since noise is additive in both pixel and gravity channels (§eq:Hv)
+        # Equivalent to: H_v R H_v^T = R
+        n = self.P.shape[0]
+
+        # ---- innovation, gain, update ------------------------------------
+        innov   = y_meas - y_pred                         # (m,)
+        S       = H @ self.P @ H.T + R                    # (m, m)
+        K       = self.P @ H.T @ jnp.linalg.inv(S)        # (n, m)
+
+        correction = K @ innov                            # (n,) tangent vector
+        self._apply_correction(correction)
+
+        I_minus_KH = jnp.eye(n) - K @ H
+        self.P = I_minus_KH @ self.P
+        self.P = 0.5 * (self.P + self.P.T)                # symmetrise
+
+        # ---- clear staging ------------------------------------------------
+        self._staged_pixels = None
+        self._staged_gravity = False
+
+        return I_minus_KH
+
+
+    def _apply_correction(self, delta: jnp.ndarray) -> None:
+        """Apply the Kalman correction K·innov to the state (composite ⊕).
+
+        Distinct from _apply_oplus (used by propagate):
+            - Pose: T ← Exp(+δξ) · T̂  (right-perturbation correction, positive sign)
+            - ℝ³ blocks: standard addition
+
+        The positive sign matches the right-perturbation convention
+        (Section sec:composite): T_true = T̂ · Exp(δξ).
+        """
+        X = self.X
+        X.T       = X.T @ jaxlie.SE3.exp(delta[:6])
+        X.v       = X.v     + delta[6:9]
+        X.omega   = X.omega + delta[9:12]
+        X.g_B     = X.g_B   + delta[12:15]
+        X.d_B     = X.d_B   + delta[15:18]
+        if len(X.feature_ids) > 0:
+            X.p_F = X.p_F + delta[18:].reshape(-1, 3)
+
 
     def augment(self, p: Point) -> None:
         """Add p to the EKF state (§sec:augment).
@@ -737,17 +915,37 @@ class Ekf:
         """Pixel-space prediction and 2x2 innovation covariance for feature `id`
         in the requested camera.
 
+        Builds a single-feature mono-`camera` view of the EKF state and runs
+        the same h_pixels / H / R machinery as the update step:
+            S = H P H^T + R                (H_v = I, additive noise §eq:Hv)
+
         Returns:
             u_hat : (2,) projected pixel.
-            S     : (2, 2) innovation covariance H_i P⁻ H_iᵀ + R_i, restricted
-                    to the requested camera's mono block (eq:Hv, eq:R).
+            S     : (2, 2) innovation covariance.
         """
         assert camera in ("L", "R"), "camera must be 'L' or 'R'"
+        if id not in self.X.feature_ids:
+            raise KeyError(f"feature {id} not in EKF state")
 
-        # ---- pixel prediction --------------------------------------------
-        p_B, Sigma_p = self.get_fp_body(id)
-        u_hat = project_point(p_B, self.calib, camera)          # (2,)
-        ...
+        # ---- single-feature mono view of this camera ---------------------
+        # The point's pixel slot only signals visibility for h/H/R dispatch;
+        # the actual value doesn't matter for prediction or covariance.
+        dummy = KeyPoint(0.0, 0.0, 1.0)
+        p = Point(id=id)
+        if camera == "L":
+            p.uL_curr = dummy
+        else:
+            p.uR_curr = dummy
+        F_set = PointSet("fp_px_view")
+        F_set.add(p)
+
+        # ---- prediction and innovation covariance ------------------------
+        u_hat = self.h_pixels(F_set)                              # (2,)
+        H     = self.get_measurement_jacobian(F_set)              # (2, n)
+        R     = self.get_measurement_noise(F_set)                 # (2, 2)
+        S     = H @ self.P @ H.T + R                              # (2, 2)
+        S     = 0.5 * (S + S.T)                                   # symmetrise
+        return u_hat, S
 
 
     def feature_output(self) -> tuple[list[jnp.ndarray], list[jnp.ndarray], list[int]]:
