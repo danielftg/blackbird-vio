@@ -25,6 +25,34 @@ import jaxlie
 from .points import Point, PointSet, PixelType
 from .ekf import project_point
 
+
+def _camera_key(camera: str) -> str:
+    assert camera in ["L", "R"], "Camera must be 'L' or 'R'"
+    return "left" if camera == "L" else "right"
+
+
+def _pixel_in_bounds(pixel: np.ndarray, size: tuple[int, int]) -> bool:
+    x, y = float(pixel[0]), float(pixel[1])
+    width, height = size
+    return 0.0 <= x < width and 0.0 <= y < height
+
+
+def _get_patch(image: MatLike, center: tuple[float, float], patch_size: tuple[int, int]) -> np.ndarray | None:
+    height, width = image.shape[:2]
+    w, h = patch_size
+    x, y = float(center[0]), float(center[1])
+    half_w = (w - 1) / 2.0
+    half_h = (h - 1) / 2.0
+    if (x - half_w) < 0 or (x + half_w) >= width or (y - half_h) < 0 or (y + half_h) >= height:
+        return None
+
+    if image.ndim == 3 and image.shape[2] == 3:
+        image = cv.cvtColor(image, cv.COLOR_BGR2GRAY)
+    patch = cv.getRectSubPix(image, (w, h), (x, y))
+    if patch is None or patch.shape[:2] != (h, w):
+        return None
+    return patch.astype(np.float32)
+
 # =============================================================================
 # Detection — FAST + Shi-Tomasi (§sec:cv)
 # =============================================================================
@@ -162,8 +190,19 @@ def predict_pixel(delta_T: jaxlie.SE3,
     """Prediction function (§eq:u_pred): pose change x point + velocity
     transport, projected through camera `camera` ∈ {"L", "R"}..
     """
-    project_point
-    
+    #SE3 apply
+    p_Bk: np.ndarray = np.array(delta_T.apply(p_Bkm1), dtype=np.float64)
+
+    #velocity transport
+    v_p_Bk: np.ndarray = np.array( 
+        delta_T.rotation().apply(v_p), dtype=np.float64
+    )
+    p_Bk_transported: np.ndarray = p_Bk + v_p_Bk * dt
+
+    # project throug pinhole
+    u_pred: np.ndarray = project_point(p_Bk_transported, calib, camera)
+ 
+    return u_pred
 
 @dataclass
 class CandidateSample:
@@ -199,14 +238,23 @@ def candidate_set(p: Point,
     Returns the list of (pixel, sample) candidates whose projections
     fall in the image. Empty list ⇒ nothing to match (caller skips).
     """
-    alg["signif"]["alpha_sr"]
-    alg["cv"]["Z_min"], alg["cv"]["Z_max"]
-    alg["cv"]["v_max"]
-    alg["cv"]["a_max"]
-    CandidateSample()
-    CandidateSample().predict
-    calib["camera_intrinsics"]["L"]["size"]
-    ...
+    assert camera in ["L", "R"], "Camera must be 'L' or 'R'"
+    if p.p_prev is None:
+        return []
+
+    p_Bkm1 = np.asarray(p.p_prev, dtype=np.float64).reshape(3,)
+    if p.v_prev is None:
+        v_p = np.zeros(3, dtype=np.float64)
+    else:
+        v_p = np.asarray(p.v_prev, dtype=np.float64).reshape(3,)
+
+    samples: list[CandidateSample] = []
+    cand = CandidateSample(delta_T=delta_T_hat, p_Bkm1=p_Bkm1, v_p=v_p)
+    cand.predict(dt, calib, camera)
+    size = tuple(calib["camera_intrinsics"][_camera_key(camera)]["size"])
+    if _pixel_in_bounds(cand.pixel, size):
+        samples.append(cand)
+    return samples
 
 def candidate_feature_set(p: Point,
                   p_Bk:jnp.ndarray, sigma:jnp.ndarray, 
@@ -222,13 +270,48 @@ def candidate_feature_set(p: Point,
     Empty list ⇒ nothing to match (caller skips).
     
     """
-    alg["signif"]["alpha_sr"]
-    CandidateSample().pixel
-    CandidateSample().p_Bk
-    CandidateSample().v_p #Set this to (0,0,0). 
-    project_point
-    calib["camera_intrinsics"]["L"]["size"]
-    ...
+    assert camera in ["L", "R"], "Camera must be 'L' or 'R'"
+    alpha_sr = float(alg["signif"]["alpha_sr"])
+    size = tuple(calib["camera_intrinsics"][_camera_key(camera)]["size"])
+
+    p_Bk = np.asarray(p_Bk, dtype=np.float64).reshape(3,)
+    sigma = np.asarray(sigma, dtype=np.float64).reshape(3, 3)
+
+    candidates: list[CandidateSample] = []
+    try:
+        eigvals, eigvecs = np.linalg.eigh(sigma)
+    except np.linalg.LinAlgError:
+        eigvals = np.clip(np.diag(sigma), 0.0, None)
+        eigvecs = np.eye(3)
+
+    eigvals = np.clip(eigvals, 0.0, None)
+    # Use the significance level as a conservative multiplier for the
+    # covariance-based search radius.
+    scale = np.sqrt(alpha_sr)
+
+    ellipsoids = [p_Bk]
+    for i in range(3):
+        std = np.sqrt(eigvals[i])
+        if std == 0.0:
+            continue
+        axis = eigvecs[:, i]
+        radius = axis * (std * scale)
+        ellipsoids.append(p_Bk + radius)
+        ellipsoids.append(p_Bk - radius)
+
+    seen = set()
+    for p_sample in ellipsoids:
+        pixel = np.asarray(project_point(jnp.asarray(p_sample), calib, camera)).reshape(2,)
+        pixel_key = (round(float(pixel[0]), 2), round(float(pixel[1]), 2))
+        if pixel_key in seen:
+            continue
+        seen.add(pixel_key)
+        if not _pixel_in_bounds(pixel, size):
+            continue
+        candidates.append(CandidateSample(pixel=pixel,
+                                          p_Bk=p_sample,
+                                          v_p=np.zeros(3, dtype=np.float64)))
+    return candidates
 
 
 def ssd_coarse_match(image_src: MatLike, image_dst: MatLike,
@@ -244,10 +327,34 @@ def ssd_coarse_match(image_src: MatLike, image_dst: MatLike,
     NCC because src and dst are the same camera one frame apart —
     brightness/contrast invariance not needed.
     """
-    alg["cv"]["ssd_patch_size"]
-    #Evaluate SSD at candidates[i].pixel 
-    #Populate candidates[i].keypoint for winning candidate
-    ...
+    patch_size = tuple(alg["cv"]["ssd_patch_size"])
+    if u_src is None or len(candidates) == 0:
+        return None
+
+    ref_patch = _get_patch(image_src, u_src.pt, patch_size)
+    if ref_patch is None:
+        return None
+
+    best = None
+    best_ssd = float("inf")
+    for cand in candidates:
+        if cand.pixel is None:
+            continue
+        patch = _get_patch(image_dst, tuple(cand.pixel.tolist()), patch_size)
+        if patch is None:
+            continue
+        diff = ref_patch - patch
+        ssd = float(np.sum(diff * diff))
+        if ssd < best_ssd:
+            best_ssd = ssd
+            best = cand
+
+    if best is None:
+        return None
+
+    x, y = float(best.pixel[0]), float(best.pixel[1])
+    best.keypoint = cv.KeyPoint(x, y, 1.0)
+    return best
 
 
 def lk_refine(image_src: MatLike, image_dst: MatLike,
@@ -260,7 +367,36 @@ def lk_refine(image_src: MatLike, image_dst: MatLike,
     termination criteria from algorithm.yaml.
     Returns the refined keypoint.
     """
-    ...
+    if u_src is None or u_init is None:
+        raise ValueError("Both source and initial keypoints are required for LK refinement")
+
+    win_size = int(alg["cv"]["klt_window"])
+    max_level = int(alg["cv"]["klt_pyramid"])
+    if image_src.ndim == 3 and image_src.shape[2] == 3:
+        image_src = cv.cvtColor(image_src, cv.COLOR_BGR2GRAY)
+    if image_dst.ndim == 3 and image_dst.shape[2] == 3:
+        image_dst = cv.cvtColor(image_dst, cv.COLOR_BGR2GRAY)
+
+    prev_pts = np.array([[u_src.pt]], dtype=np.float32)
+    next_pts = np.array([[u_init.pt]], dtype=np.float32)
+    criteria = (cv.TERM_CRITERIA_EPS | cv.TERM_CRITERIA_COUNT, 30, 0.01)
+    next_pts_refined, status, _ = cv.calcOpticalFlowPyrLK(
+        image_src, image_dst,
+        prev_pts, next_pts,
+        winSize=(win_size, win_size),
+        maxLevel=max_level,
+        criteria=criteria,
+        flags=cv.OPTFLOW_USE_INITIAL_FLOW,
+    )
+
+    if next_pts_refined is None or status is None or status.shape[0] == 0:
+        return u_init
+    if int(status[0, 0]) != 1:
+        return u_init
+
+    x, y = float(next_pts_refined[0, 0, 0]), float(next_pts_refined[0, 0, 1])
+    return cv.KeyPoint(x, y, u_init.size, u_init.angle,
+                       u_init.response, u_init.octave, u_init.class_id)
 
 
 def fb_check(image_src: MatLike, image_dst: MatLike,
@@ -272,7 +408,29 @@ def fb_check(image_src: MatLike, image_dst: MatLike,
     Primary failure detector for LK tracking.
     True if passed check. 
     """
-    ...
+    if u_src is None or u_dst is None:
+        return False
+
+    if image_src.ndim == 3 and image_src.shape[2] == 3:
+        image_src = cv.cvtColor(image_src, cv.COLOR_BGR2GRAY)
+    if image_dst.ndim == 3 and image_dst.shape[2] == 3:
+        image_dst = cv.cvtColor(image_dst, cv.COLOR_BGR2GRAY)
+
+    prev_pts = np.array([[u_dst.pt]], dtype=np.float32)
+    next_pts_back, status, _ = cv.calcOpticalFlowPyrLK(
+        image_dst, image_src,
+        prev_pts, None,
+        winSize=(int(alg["cv"]["klt_window"]), int(alg["cv"]["klt_window"])),
+        maxLevel=int(alg["cv"]["klt_pyramid"]),
+        criteria=(cv.TERM_CRITERIA_EPS | cv.TERM_CRITERIA_COUNT, 30, 0.01),
+    )
+    if next_pts_back is None or status is None or int(status[0, 0]) != 1:
+        return False
+
+    x_back, y_back = float(next_pts_back[0, 0, 0]), float(next_pts_back[0, 0, 1])
+    x_src, y_src = float(u_src.pt[0]), float(u_src.pt[1])
+    error = np.hypot(x_back - x_src, y_back - y_src)
+    return error <= float(alg["cv"]["fb_check"])
 
 
 # =============================================================================
