@@ -212,70 +212,41 @@ def grid_select_features(pool: list[cv.KeyPoint],
     as the per-cell ranker. Suppresses cells already saturated by points
     in `existing` (avoid clustering on existing trackers, dont select existing points.).
     """
+    # Implementation note: keep one candidate from every non-empty cell when
+    # possible, then fill the remaining global quota from the best leftovers.
+    # Existing points are read from Point.uL_curr/uR_curr via the PointSet API.
+    if camera not in ("L", "R"):
+        raise ValueError("camera must be 'L' or 'R'")
+
     cam_key = "left" if camera == "L" else "right"
     width, height = calib["camera_intrinsics"][cam_key]["size"]
-    grid_rows, grid_cols = alg["cv"]["grid_cells"]
-    cell_width = width / grid_cols
-    cell_height = height / grid_rows
+    grid_cols, grid_rows = alg["cv"]["grid_cells"]
     N_feat_gl = alg["cv"]["N_feat_gl"]
     N_feat_lo = alg["cv"]["N_feat_lo"]
-    N_F_max = alg["cv"]["N_F_max"]
-    
-    # Get existing pixels for this camera
-    existing_pixels = []
-    for point in existing.points:
-        if camera == "L" and point.uL is not None:
-            existing_pixels.append(point.uL.pt)
-        elif camera == "R" and point.uR is not None:
-            existing_pixels.append(point.uR.pt)
-    existing_pixels = np.array(existing_pixels)
-    
+
+    existing_pixels = _current_pixels(existing, camera)
+    cells = _keypoints_by_cell(pool, existing_pixels, width, height,
+                               grid_rows, grid_cols)
+
     selected = []
+    remaining = []
     for row in range(grid_rows):
         for col in range(grid_cols):
-            # Cell bounds
-            x_min = col * cell_width
-            x_max = (col + 1) * cell_width
-            y_min = row * cell_height
-            y_max = (row + 1) * cell_height
-            
-            # Count existing in cell
-            if len(existing_pixels) > 0:
-                in_cell = ((existing_pixels[:, 0] >= x_min) & (existing_pixels[:, 0] < x_max) &
-                           (existing_pixels[:, 1] >= y_min) & (existing_pixels[:, 1] < y_max))
-                count_existing = np.sum(in_cell)
-            else:
-                count_existing = 0
-            
-            if count_existing >= N_F_max:
-                continue  # Saturated
-            
-            # Collect keypoints in cell, not close to existing
-            cell_kp = []
-            for kp in pool:
-                x, y = kp.pt
-                if x_min <= x < x_max and y_min <= y < y_max:
-                    # Check if close to existing
-                    close = False
-                    for ex_pt in existing_pixels:
-                        if np.linalg.norm(np.array(kp.pt) - ex_pt) < 1.0:  # 1 pixel threshold
-                            close = True
-                            break
-                    if not close:
-                        cell_kp.append(kp)
-            
-            # Sort by response descending
-            cell_kp.sort(key=lambda kp: kp.response, reverse=True)
-            
-            # Take top N_feat_lo
-            num_to_take = min(N_feat_lo, len(cell_kp))
-            selected.extend(cell_kp[:num_to_take])
-    
-    # If total selected > N_feat_gl, take top N_feat_gl by response
+            cell_kp = sorted(cells[row][col],
+                             key=lambda kp: kp.response,
+                             reverse=True)
+            cell_take = cell_kp[:N_feat_lo]
+            if cell_take:
+                selected.append(cell_take[0])
+                remaining.extend(cell_take[1:])
+
+    remaining.sort(key=lambda kp: kp.response, reverse=True)
     if len(selected) > N_feat_gl:
         selected.sort(key=lambda kp: kp.response, reverse=True)
-        selected = selected[:N_feat_gl]
-    
+        return selected[:N_feat_gl]
+
+    selected.extend(remaining[:N_feat_gl - len(selected)])
+
     return selected
 
 
@@ -296,74 +267,103 @@ def focus_select_interest(pool: list[cv.KeyPoint],
     keypoints are picked (See paper for details).
     Don't select existing points.
     """
+    # Implementation note: N_I is represented by N_I_max in algorithm.yaml, and
+    # each camera receives N_I_max/2 candidates as described in the report.
+    # Existing points are read from Point.uL_curr/uR_curr via the PointSet API.
+    if camera not in ("L", "R"):
+        raise ValueError("camera must be 'L' or 'R'")
+
     cam_key = "left" if camera == "L" else "right"
     width, height = calib["camera_intrinsics"][cam_key]["size"]
-    grid_rows, grid_cols = alg["cv"]["grid_cells"]
+    grid_cols, grid_rows = alg["cv"]["grid_cells"]
     cell_width = width / grid_cols
     cell_height = height / grid_rows
-    N_I = alg["cv"]["N_I"] if "N_I" in alg["cv"] else 50  # assume default
-    N_I_max = alg["cv"]["N_I_max"]
-    
+    n_camera = alg["cv"]["N_I_max"] // 2
+
     # Project focus into camera
     focus_pixel = project_point(focus_B, calib, camera)
     if focus_pixel is None:
         return []
     focus_pixel = np.asarray(focus_pixel).reshape(-1)[:2]
-    
-    # Get existing pixels
-    existing_pixels = []
-    for point in existing.points:
-        if camera == "left" and point.uL is not None:
-            existing_pixels.append(point.uL.pt)
-        elif camera == "right" and point.uR is not None:
-            existing_pixels.append(point.uR.pt)
-    existing_pixels = np.array(existing_pixels)
-    
+
+    existing_pixels = _current_pixels(existing, camera)
+    cells = _keypoints_by_cell(pool, existing_pixels, width, height,
+                               grid_rows, grid_cols)
+
     # Compute p_g for each cell
-    p_g = np.zeros((grid_rows, grid_cols))
+    weights = np.zeros((grid_rows, grid_cols), dtype=float)
+    trunc_radius = alg["cv"].get("focus_trunc_radius", 3.0 * sigma_F)
     for row in range(grid_rows):
         for col in range(grid_cols):
             cell_center_x = (col + 0.5) * cell_width
             cell_center_y = (row + 0.5) * cell_height
-            dist = np.linalg.norm(np.array([cell_center_x, cell_center_y]) - focus_pixel)
-            p_g[row, col] = np.exp(-dist**2 / (2 * sigma_F**2))
-    
-    # Normalize p_g
-    total_p = np.sum(p_g)
-    if total_p > 0:
-        p_g /= total_p
-    
+            dist = np.linalg.norm(
+                np.array([cell_center_x, cell_center_y]) - focus_pixel
+            )
+            if dist <= trunc_radius:
+                weights[row, col] = np.exp(-dist**2 / (2 * sigma_F**2))
+
+    total_weight = np.sum(weights)
+    if total_weight <= 0:
+        return []
+
+    probs = weights / total_weight
+    nonzero = weights > 0
+    peak = np.unravel_index(np.argmax(weights), weights.shape)
+
+    alloc = np.zeros((grid_rows, grid_cols), dtype=int)
+    alloc[nonzero] = np.maximum(1, np.floor(n_camera * probs[nonzero]).astype(int))
+    residual = n_camera - int(np.sum(alloc))
+    alloc[peak] += residual
+    alloc = np.maximum(alloc, 0)
+
     selected = []
     for row in range(grid_rows):
         for col in range(grid_cols):
-            # Cell bounds
-            x_min = col * cell_width
-            x_max = (col + 1) * cell_width
-            y_min = row * cell_height
-            y_max = (row + 1) * cell_height
-            
-            # Collect kp in cell, not close to existing
-            cell_kp = []
-            for kp in pool:
-                x, y = kp.pt
-                if x_min <= x < x_max and y_min <= y < y_max:
-                    close = False
-                    for ex_pt in existing_pixels:
-                        if np.linalg.norm(np.array(kp.pt) - ex_pt) < 1.0:
-                            close = True
-                            break
-                    if not close:
-                        cell_kp.append(kp)
-            
-            # Sort by response
-            cell_kp.sort(key=lambda kp: kp.response, reverse=True)
-            
-            # Allocate num = floor(N_I * p_g[row, col])
-            num = int(np.floor(N_I * p_g[row, col]))
-            num = min(num, N_I_max, len(cell_kp))
+            num = min(alloc[row, col], len(cells[row][col]))
+            cell_kp = sorted(cells[row][col],
+                             key=lambda kp: kp.response,
+                             reverse=True)
             selected.extend(cell_kp[:num])
-    
+
     return selected
+
+
+def _current_pixels(points: PointSet, camera: str) -> np.ndarray:
+    """Return current-frame pixels already occupied in one camera."""
+    pixels = []
+    for point in points:
+        keypoint = point.uL_curr if camera == "L" else point.uR_curr
+        if keypoint is not None:
+            pixels.append(keypoint.pt)
+
+    return np.asarray(pixels, dtype=float).reshape(-1, 2)
+
+
+def _keypoints_by_cell(pool: list[cv.KeyPoint],
+                       occupied: np.ndarray,
+                       width: int, height: int,
+                       grid_rows: int, grid_cols: int
+                       ) -> list[list[list[cv.KeyPoint]]]:
+    """Bucket unoccupied keypoints by image grid cell."""
+    cells = [[[] for _ in range(grid_cols)] for _ in range(grid_rows)]
+    cell_width = width / grid_cols
+    cell_height = height / grid_rows
+
+    for kp in pool:
+        x, y = kp.pt
+        if not (0 <= x < width and 0 <= y < height):
+            continue
+        if occupied.size and np.any(
+            np.linalg.norm(occupied - np.asarray(kp.pt), axis=1) < 1.0
+        ):
+            continue
+
+        col = min(int(x / cell_width), grid_cols - 1)
+        row = min(int(y / cell_height), grid_rows - 1)
+        cells[row][col].append(kp)
+
+    return cells
 
 # =============================================================================
 # Stereo matching — NCC (§sec:cv)
@@ -385,13 +385,18 @@ def stereo_match(image_src: MatLike, image_dst: MatLike,
     refinement by parabolic peak fitting on the NCC response.
 
     NCC threshold and search-window parameters from algorithm.yaml.
+
+    Uses normalized cross-correlation:
+      NCC(u_L, u_R) = Σ (I_L - Ī_L)(I_R - Ī_R) / sqrt(Σ (I_L - Ī_L)^2 Σ (I_R - Ī_R)^2)
+    as in Equation (145).
     """
     disp_min = alg["cv"]["disp_min"]
     disp_max = alg["cv"]["disp_max"]
     stereo_subpix = alg["cv"]["stereo_subpix"]
     ncc_min = alg["cv"]["ncc_min"]
-    patch_size = alg["cv"]["ncc_patch_size"]
-    half_patch = patch_size // 2
+    patch_size_cfg = alg["cv"]["ncc_patch_size"]
+    patch_width = patch_size_cfg[0] if isinstance(patch_size_cfg, list) else patch_size_cfg
+    half_patch = int(patch_width) // 2
     
     height_src, width_src = image_src.shape[:2]
     height_dst, width_dst = image_dst.shape[:2]
@@ -458,34 +463,34 @@ def stereo_match(image_src: MatLike, image_dst: MatLike,
             continue
         
         # Sub-pixel refinement
-        if stereo_subpix and 0 < max_idx < len(ncc_values) - 1:
-            # Fit parabola: y = a*(x-x0)^2 + b
-            x0 = u_peak
-            y0 = max_ncc
-            xm1 = u_positions[max_idx - 1]
-            ym1 = ncc_values[max_idx - 1]
-            xp1 = u_positions[max_idx + 1]
-            yp1 = ncc_values[max_idx + 1]
-            
-            # Solve for a, b
-            # At xm1: a*(xm1-x0)^2 + b = ym1
-            # At x0: b = y0
-            # At xp1: a*(xp1-x0)^2 + b = yp1
-            denom = (xm1 - x0)**2 - (xp1 - x0)**2
-            if abs(denom) > 1e-6:
-                a = ((ym1 - y0) - (yp1 - y0) * (xm1 - x0)**2 / (xp1 - x0)**2) / denom
-                if a < 0:  # Maximum
-                    delta = - (xp1 - x0)**2 / (2 * a * (xm1 - x0))
-                    u_refined = x0 + delta
+        if stereo_subpix:
+            # Refine the matched point with OpenCV subpixel corner localization.
+            if (u_peak - half_patch >= 0 and u_peak + half_patch < width_dst and
+                    v_src - half_patch >= 0 and v_src + half_patch < height_dst):
+                initial_corner = np.array([[[u_peak, v_src]]], dtype=np.float32)
+                criteria = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 20, 0.03)
+                refined = cv.cornerSubPix(
+                    gray_dst,
+                    initial_corner,
+                    (half_patch, half_patch),
+                    (-1, -1),
+                    criteria
+                )
+                if refined is not None and refined.shape == (1, 1, 2):
+                    u_refined = float(refined[0, 0, 0])
+                    v_refined = float(refined[0, 0, 1])
                 else:
                     u_refined = u_peak
+                    v_refined = v_src
             else:
                 u_refined = u_peak
+                v_refined = v_src
         else:
             u_refined = u_peak
+            v_refined = v_src
         
         # Create matched keypoint
-        matched_kp = cv.KeyPoint(u_refined, v_src, kp_src.size, kp_src.angle, kp_src.response, kp_src.octave, kp_src.class_id)
+        matched_kp = cv.KeyPoint(u_refined, v_refined, kp_src.size, kp_src.angle, kp_src.response, kp_src.octave, kp_src.class_id)
         matches[idx] = matched_kp
     
     return matches
@@ -524,7 +529,7 @@ def reconstruct_depth(points: PointSet, calib: dict, alg: dict) -> PointSet:
     t_LB = T_LB[:3, 3]
     R_BL = R_LB.T
 
-    sigma_px = 1 #Placeholde, should be replaced withe parameter from algorithm.yaml
+    sigma_px = float(alg["cv"].get("sigma_px", 1.0))
 
     for point in points:
         if point.p_curr is not None:
