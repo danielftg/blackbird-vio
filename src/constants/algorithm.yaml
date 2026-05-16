@@ -41,9 +41,12 @@ cv:                                    # computer vision parameters
                                        # round-trip pixel error exceeds this.
   klt_window:     21                   # KLT integration window size [px]
   klt_pyramid:    3                    # KLT pyramid levels
+  klt_max_iter:   30                   # LK termination max iterations
+  klt_eps:        0.01                 # LK termination epsilon
+ 
   n_max:          200                  # max point lifetime [frames]
                                        # (~3.3 s at 60 Hz)
-  ssd_patch_size: [11,11]              # Size of matching patch
+  ssd_patch_size: [11,11]              # Size of matching patch [width, height]
   # ---- stereo matching --------------------------------------------------
   ncc_min:        0.8                  # Minimum NCC value for stereo matching
   ncc_patch_size: [15,15]              # Size of matching patch
@@ -56,13 +59,13 @@ cv:                                    # computer vision parameters
   # ---- search region (§3.8.3) ------------------------------------------
   Z_min:          0.3                  # [m] min predicted depth (RealSense
                                        # short-range floor)
-  Z_max:          20.0                 # [m] max predicted depth (indoor scene
+  Z_max:          50.0                 # [m] max predicted depth (indoor scene
                                        # bound; refine for outdoor sequences)
-  v_max:          5.0                  # [m/s] max body-frame velocity assumed
+  v_max:          10.0                 # [m/s] max body-frame velocity assumed
                                        # for inter-frame prediction
-  a_max:          15.0                 # [m/s²] max body-frame acceleration
+  a_max:          20.0                 # [m/s²] max body-frame acceleration
                                        # assumed for inter-frame prediction
-
+                                
 solver:                                # stage-2 nonlinear solver (Gauss-Newton)
   max_iters:      10                   # max GN iterations per frame
   rel_tol:        1.0e-5               # relative cost decrease termination
