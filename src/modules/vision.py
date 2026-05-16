@@ -354,9 +354,7 @@ def stereo_match(image_src: MatLike, image_dst: MatLike,
 # Stereo depth and covariance (§sec:depth_estimation)
 # =============================================================================
 
-def reconstruct_depth(points: PointSet,
-                      calib:  dict
-                      ) -> PointSet:
+def reconstruct_depth(points: PointSet, calib:  dict) -> PointSet:
     """Triangulate current (u_L, u_R) pixel pairs into a body-frame 3D point.
         Only do so for points without 3D point data.
     For rectified stereo:  Z = b·fx / (uL.x − uR.x)
@@ -370,82 +368,48 @@ def reconstruct_depth(points: PointSet,
     Jacobian. 
     
     """
-    left_intr = calib["camera_intrinsics"]["left"]
-    right_intr = calib["camera_intrinsics"]["right"]
-    fx = left_intr["fx"]
-    fy = left_intr["fy"]
-    cx = left_intr["cx"]
-    cy = left_intr["cy"]
-    b = calib["extrinsics"]["baseline"]  # assume b is there
-    T_BL = np.array(calib["extrinsics"]["T_BL"])  # 4x4
+
     
-    sigma_px = calib["sigma_px"] if "sigma_px" in calib else 1.0  # assume
-    
-    for point in points.points:
-        if point.p_B is not None:
+    K_L = np.asarray(calib["camera_intrinsics"]["left"]["k_matrix"])
+    fu = float(K_L[0, 0])
+    fv = float(K_L[1, 1])
+    cu = float(K_L[0, 2])
+    cv = float(K_L[1, 2])
+
+    baseline = float(calib["camera_extrinsics"]["baseline"])
+
+    T_LB = np.asarray(calib["camera_extrinsics"]["left"]["cog_cam"])
+    R_LB = T_LB[:3, :3]
+    t_LB = T_LB[:3, 3]
+    R_BL = R_LB.T
+
+    for point in points:
+        if point.p_curr is not None:
             continue
-        if point.uL is None or point.uR is None:
+
+        if point.uL_curr is None or point.uR_curr is None:
             continue
-        
-        uL_x, uL_y = point.uL.pt
-        uR_x, uR_y = point.uR.pt
-        
-        # Assume rectified, so vL == vR
-        d = uL_x - uR_x
-        if d <= 0:
-            continue  # invalid disparity
-        
-        Z = b * fx / d
-        X = (uL_x - cx) * Z / fx
-        Y = (uL_y - cy) * Z / fy
-        
-        p_L = np.array([X, Y, Z, 1.0])
-        p_B_homo = T_BL @ p_L
-        point.p_B = p_B_homo[:3]
-        
-        # Covariance propagation
-        # Jacobian of triangulation
-        # p_L = [X, Y, Z]
-        # partial Z / partial uL_x = -b*fx / d^2
-        # partial Z / partial uR_x = b*fx / d^2
-        # partial X / partial uL_x = Z/fx + (uL_x - cx) * (-b*fx / d^2) / fx = Z/fx - (uL_x - cx)*b / d^2
-        # partial X / partial uR_x = (uL_x - cx) * (b*fx / d^2) / fx = (uL_x - cx)*b / d^2
-        # partial Y / partial uL_y = Z/fy
-        # partial Y / partial uR_y = 0 (assuming rectified)
-        
-        dZ_duLx = -b * fx / (d**2)
-        dZ_duRx = b * fx / (d**2)
-        dX_duLx = Z / fx + (uL_x - cx) * dZ_duLx / fx
-        dX_duRx = (uL_x - cx) * dZ_duRx / fx
-        dY_duLy = Z / fy
-        dY_duRy = 0.0
-        
-        # Jacobian J: 3x4, since u = [uL_x, uL_y, uR_x, uR_y]
-        J = np.array([
-            [dX_duLx, dY_duLy, dX_duRx, dY_duRy],
-            [0, 0, 0, 0],  # Y doesn't depend on uL_x, uR_x
-            [dZ_duLx, 0, dZ_duRx, 0]
-        ])
-        
-        # But Y depends on uL_y, so correct
-        J[1, 0] = 0  # dY_duLx = 0
-        J[1, 1] = dY_duLy
-        J[1, 2] = 0  # dY_duRx = 0
-        J[1, 3] = dY_duRy
-        
-        # Σ_u = sigma_px^2 * I_4
-        Sigma_u = sigma_px**2 * np.eye(4)
-        
-        # Σ_p_L = J @ Sigma_u @ J.T
-        Sigma_p_L = J @ Sigma_u @ J.T
-        
-        # Now, transform to body frame
-        # p_B = T_BL @ p_L, but since T_BL is rigid, Σ_p_B = R @ Sigma_p_L @ R.T
-        R_BL = T_BL[:3, :3]
-        Sigma_p_B = R_BL @ Sigma_p_L @ R_BL.T
-        
-        point.Sigma_p = Sigma_p_B
-    
+
+        uLx, uLy = point.uL_curr.pt
+        uRx, _ = point.uR_curr.pt
+        disparity = uLx - uRx
+        if disparity <= 1e-6:
+            continue
+
+        # inverse camera projection κ^{-1} : (u, v) -> (x_d, y_d)
+        x_d = (uLx - cu) / fu
+        y_d = (uLy - cv) / fv
+
+        # here distortion is assumed zero, so x_n = x_d
+        x_n, y_n = x_d, y_d
+
+        Z = baseline * fu / disparity
+        p_c = np.array([x_n * Z, y_n * Z, Z], dtype=float)
+
+        # transform from left-camera frame into body frame via T_BL
+        p_B = R_BL @ (p_c - t_LB)
+        point.p_curr = p_B
+
     return points
 
 
