@@ -354,7 +354,7 @@ def stereo_match(image_src: MatLike, image_dst: MatLike,
 # Stereo depth and covariance (§sec:depth_estimation)
 # =============================================================================
 
-def reconstruct_depth(points: PointSet, calib:  dict) -> PointSet:
+def reconstruct_depth(points: PointSet, calib: dict, alg: dict) -> PointSet:
     """Triangulate current (u_L, u_R) pixel pairs into a body-frame 3D point.
         Only do so for points without 3D point data.
     For rectified stereo:  Z = b·fx / (uL.x − uR.x)
@@ -383,6 +383,8 @@ def reconstruct_depth(points: PointSet, calib:  dict) -> PointSet:
     t_LB = T_LB[:3, 3]
     R_BL = R_LB.T
 
+    sigma_px = 1 #Placeholde, should be replaced withe parameter from algorithm.yaml
+
     for point in points:
         if point.p_curr is not None:
             continue
@@ -406,9 +408,28 @@ def reconstruct_depth(points: PointSet, calib:  dict) -> PointSet:
         Z = baseline * fu / disparity
         p_c = np.array([x_n * Z, y_n * Z, Z], dtype=float)
 
+        C_11 = 1 / fu
+        C_22 = 1 / fv
+
+        # propagate stereo pixel noise through triangulation Jacobian
+        J = np.zeros((3, 3), dtype=float)
+        J[0, 0] = C_11 - x_n  / disparity
+        J[0, 2] = x_n  / disparity
+        J[1, 0] = -y_n / disparity
+        J[1, 1] = C_22
+        J[1, 2] = y_n / disparity
+        J[2, 0] = -1 / disparity
+        J[2, 2] = 1 / disparity
+        
+        J = Z * J
+
+        Sigma_pc = J @ (sigma_px**2 * np.eye(3, dtype=float)) @ J.T
+        Sigma_pB = R_BL @ Sigma_pc @ R_BL.T
+
         # transform from left-camera frame into body frame via T_BL
         p_B = R_BL @ (p_c - t_LB)
         point.p_curr = p_B
+        point.Sigma_curr = Sigma_pB
 
     return points
 
