@@ -29,8 +29,7 @@ from .ekf import project_point
 # Detection — FAST + Shi-Tomasi (§sec:cv)
 # =============================================================================
 
-def detect_keypoints(image: MatLike, calib: dict, alg: dict
-                     ) -> list[cv.KeyPoint]:
+def detect_keypoints(image: MatLike, calib: dict, alg: dict) -> list[cv.KeyPoint]:
     """Run FAST detection then Shi-Tomasi cornerness scoring on `image`.
 
     Returns the unfiltered keypoint pool — caller decides how to allocate
@@ -39,36 +38,22 @@ def detect_keypoints(image: MatLike, calib: dict, alg: dict
 
     Stored once per frame in the pipeline; passed to allocators below.
     """
-    # FAST detector
-    fast = cv.FastFeatureDetector_create(threshold=alg["cv"]["fast_threshold"] if "fast_threshold" in alg["cv"] else 10,
-                                         nonmaxSuppression=True)
-    keypoints = fast.detect(image, None)
+    # Convert to grayscale if needed
+    gray = cv.cvtColor(image, cv.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
     
-    if not keypoints:
+    # Detect corners using goodFeaturesToTrack with Shi-Tomasi quality threshold
+    corners = cv.goodFeaturesToTrack(gray, maxCorners=alg["cv"]["N_I_max"], qualityLevel=alg["cv"]["tau_min"], minDistance=1)
+    
+    if corners is None or len(corners) == 0:
         return []
     
-    # Compute Shi-Tomasi scores (min eigenvalue)
-    gray = cv.cvtColor(image, cv.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
-    scores = cv.cornerMinEigenVal(gray, blockSize=alg["cv"]["shi_tomasi_block_size"] if "shi_tomasi_block_size" in alg["cv"] else 3)
+    # Convert corner points to cv.KeyPoint objects
+    keypoints = []
+    for (x, y) in corners[:, 0]:
+        kp = cv.KeyPoint(x, y, 1.0)
+        keypoints.append(kp)
     
-    # Get max eigenvalue in image for normalization
-    max_eigenval = np.max(scores)
-    tau_min = alg["cv"]["tau_min"] * max_eigenval
-    
-    # Filter and score keypoints
-    filtered_keypoints = []
-    for kp in keypoints:
-        x, y = int(kp.pt[0]), int(kp.pt[1])
-        if 0 <= x < scores.shape[1] and 0 <= y < scores.shape[0]:
-            score = scores[y, x]
-            if score > tau_min:
-                kp.response = score
-                filtered_keypoints.append(kp)
-    
-    # Sort by response descending
-    filtered_keypoints.sort(key=lambda kp: kp.response, reverse=True)
-    
-    return filtered_keypoints
+    return keypoints
 
 
 # =============================================================================
