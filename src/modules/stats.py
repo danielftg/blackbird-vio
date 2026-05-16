@@ -20,7 +20,7 @@ import jax.numpy as jnp
 import numpy as np
 from scipy.stats import chi2
 
-from .points import Point, PointSet, CorrType
+from .points import PointSet
 from .ekf import Ekf
 
 
@@ -80,16 +80,18 @@ def feature_nis_gate(ekf: Ekf,
         R = ekf.get_measurement_noise(single)
         P = ekf.covariance
         S = H @ P @ H.T + R
+
         if S.size == 0:
             continue
 
         y = y_meas - y_hat
 
-        try:
-            gamma = float(y.T @ jnp.linalg.solve(S, y))
-        except Exception:
+        res = jnp.linalg.solve(S, y)
+        if jnp.any(jnp.isnan(res)) or jnp.any(jnp.isinf(res)):
             gamma = float(y.T @ (jnp.linalg.pinv(S) @ y))
-
+        else:
+            gamma = float(y.T @ res)
+            
         dof = 4 if (
             p.uL_curr is not None and
             p.uR_curr is not None
@@ -112,7 +114,7 @@ def joint_consistency(inlier_ids: set[int],
 
     γ_joint = Σ_{i ∈ S} γ_i 
      
-    and compates it against χ²_{Σ ν_i}.
+    and compares it against χ²_{Σ ν_i}.
     Exact χ² behaviour assumes independent innovations.
 
     Returns True if the inlier set is jointly consistent (γ_joint 
@@ -126,12 +128,12 @@ def joint_consistency(inlier_ids: set[int],
     gamma_joint = 0.0
     dof_joint = 0
 
-    for id in inlier_ids:
+    for pid in inlier_ids:
 
-        if id not in gammas:
+        if pid not in gammas:
             continue
 
-        gamma_i, dof_i = gammas[id]
+        gamma_i, dof_i = gammas[pid]
 
         gamma_joint += gamma_i
         dof_joint += dof_i
@@ -179,7 +181,7 @@ def admission_velocity_gate(F_pre: PointSet,
             if v_hat.size == 0:
                 reject_ids.add(p.id)
                 continue
-            v_perp = float(v_hat[0])
+            v_perp = np.linalg.norm(v_hat) 
             Sigma = np.asarray(p.Sigma_curr, dtype=np.float64)
             if Sigma.ndim != 2 or Sigma.shape[0] < 1 or Sigma.shape[1] < 1:
                 reject_ids.add(p.id)
@@ -192,21 +194,20 @@ def admission_velocity_gate(F_pre: PointSet,
             dof = 1
         else:
             v_hat = np.asarray(p.v_curr, dtype=np.float64).reshape(3,)
-            if v_hat.shape != (3,):
-                reject_ids.add(p.id)
-                continue
+            
             Sigma = np.asarray(p.Sigma_curr, dtype=np.float64)
             if Sigma.ndim == 2 and Sigma.shape == (6, 6):
                 Sigma_v = Sigma[3:6, 3:6]
-            elif Sigma.ndim == 2 and Sigma.shape == (3, 3):
-                Sigma_v = Sigma
             else:
                 reject_ids.add(p.id)
                 continue
-            try:
-                gamma = float(v_hat.T @ np.linalg.solve(Sigma_v, v_hat))
-            except np.linalg.LinAlgError:
+        
+            res = np.linalg.solve(Sigma_v, v_hat)
+            if jnp.any(jnp.isnan(res)) or jnp.any(jnp.isinf(res)):
                 gamma = float(v_hat.T @ (np.linalg.pinv(Sigma_v) @ v_hat))
+            else:
+                gamma = float(v_hat.T @ res)
+
             dof = 3
 
         if gamma <= chi2_threshold(alpha, dof):
