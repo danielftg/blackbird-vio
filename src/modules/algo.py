@@ -184,8 +184,8 @@ class Algo:
             id = self.id_gen.next()
             accum.F_pre.add(Point(id, uL_curr=kp_pair[0], uR_curr=kp_pair[1]))
 
-        accum.I = reconstruct_depth(accum.I, calib)
-        accum.F_pre = reconstruct_depth(accum.F_pre, calib)
+        accum.I = reconstruct_depth(accum.I, calib, alg)
+        accum.F_pre = reconstruct_depth(accum.F_pre, calib, alg)
     
         accum.EKF = Ekf(calib)
         accum.X_prev = accum.EKF.state
@@ -528,7 +528,7 @@ class Algo:
                 id = self.id_gen.next()
                 self.accum.I.add(Point(id, uL_curr=kp_pair[0], uR_curr=kp_pair[1]))
             
-            self.accum.I = reconstruct_depth(self.accum.I, self.calib)
+            self.accum.I = reconstruct_depth(self.accum.I, self.calib, self.alg)
         
         if N_F_repl > 0:
             all_pts = self.accum.I.union(self.accum.F)
@@ -558,7 +558,7 @@ class Algo:
                 id = self.id_gen.next()
                 self.accum.F_pre.add(Point(id, uL_curr=kp_pair[0], uR_curr=kp_pair[1]))
         
-            self.accum.F_pre = reconstruct_depth(self.accum.F_pre, self.calib)
+            self.accum.F_pre = reconstruct_depth(self.accum.F_pre, self.calib, self.alg)
 
         return (I_hit_limit, F_hit_limit)
 

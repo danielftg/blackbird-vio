@@ -55,6 +55,7 @@ cv:                                    # computer vision parameters
   disp_max:       128                  # max disparity [px]. Enforces Z_min
                                        # constraint at b·fx/disp_max
   stereo_subpix:  true                 # parabolic sub-pixel disparity refinement
+  sigma_px:      1.0                  # [px] standard deviation of stereo pixel noise
 
   # ---- search region (§3.8.3) ------------------------------------------
   Z_min:          0.3                  # [m] min predicted depth (RealSense
