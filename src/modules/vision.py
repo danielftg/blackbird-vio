@@ -23,7 +23,7 @@ import cv2 as cv
 import numpy as np
 import jax.numpy as jnp
 import jaxlie
-from scipy.stats import chi2
+from scipy.stats import chi2,norm
 
 from .points import Point, PointSet, PixelType
 from .ekf import project_point
@@ -170,18 +170,45 @@ def _build_deltaT_arrays(delta_T_hat: jaxlie.SE3,
 # Detection — FAST + Shi-Tomasi (§sec:cv)
 # =============================================================================
 
-def detect_keypoints(image: MatLike, calib: dict, alg: dict
-                     ) -> list[cv.KeyPoint]:
+def detect_keypoints(image: MatLike, calib: dict, alg: dict) -> list[cv.KeyPoint]:
     """Run FAST detection then Shi-Tomasi cornerness scoring on `image`.
 
     Returns the unfiltered keypoint pool — caller decides how to allocate
     via grid_select / focus_select. Sorted by Shi-Tomasi response,
-    descending. Threshold τ_min from algorithm.yaml.
+    descending. 
 
     Stored once per frame in the pipeline; passed to allocators below.
     """
-    ...
-    alg["cv"]["tau_min"] #absolute threshold = tau_min · max eigenvalue in image)
+    tau_min        = float(alg["cv"]["tau_min"])
+    fast_threshold = int(alg["cv"]["fast_threshold"])
+    fast_non_max   = bool(alg["cv"]["fast_non_max"])
+    sht_block_size = int(alg["cv"]["sht_block_size"])
+    sht_ksize      = int(alg["cv"]["sht_ksize"])
+
+    # FAST detection
+    fast = cv.FastFeatureDetector_create(threshold=fast_threshold, nonmaxSuppression=fast_non_max)
+    fast_kps = fast.detect(image, None)
+    if len(fast_kps) == 0:
+        return []
+
+    # Shi-Tomasi response per FAST keypoint
+    response_img = cv.cornerMinEigenVal(image, blockSize=sht_block_size, ksize=sht_ksize)
+    max_response = float(response_img.max())
+    threshold = tau_min * max_response
+
+    keypoints = []
+    for kp in fast_kps:
+        ix, iy = int(round(kp.pt[0])), int(round(kp.pt[1]))
+        ix = max(0, min(response_img.shape[1] - 1, ix))
+        iy = max(0, min(response_img.shape[0] - 1, iy))
+        score = float(response_img[iy, ix])
+        if score < threshold:
+            continue
+        kp.response = score
+        keypoints.append(kp)
+
+    keypoints.sort(key=lambda k: k.response, reverse=True)
+    return keypoints
 
 
 # =============================================================================
@@ -190,44 +217,166 @@ def detect_keypoints(image: MatLike, calib: dict, alg: dict
 
 def grid_select_features(pool: list[cv.KeyPoint],
                          existing: PointSet,
-                         calib: dict, alg: dict, camera: "str"
+                         calib: dict, alg: dict, camera: str
                          ) -> list[cv.KeyPoint]:
-    """Allocate feature replenishments uniformly across an N×M grid.
+    """Allocate feature replenishments across an N×M grid for spatial spread.
 
-    Picks N_feat,gl total across the image, with at least N_feat,lo per
-    cell (cells with no candidates left empty, cell size from alg). Uses Shi-Tomasi response
-    as the per-cell ranker. Suppresses cells already saturated by points
-    in `existing` (avoid clustering on existing trackers, dont select existing points.).
+    Strategy:
+      1. Drop pool entries too close to existing points (min_distance_px).
+      2. Pick top N_feat_gl globally by response (pool is already sorted).
+      3. Bin the leftovers into the grid; take top N_feat_lo from each cell.
+
+    Returns up to N_feat_gl + grid_rows·grid_cols·N_feat_lo keypoints. The
+    caller truncates to its replenishment budget.
     """
-    alg["cv"]["grid_cells"]
-    calib["camera_intrinsics"]["left"]["size"]
-    alg["cv"]["N_feat_gl"]
-    alg["cv_N_feat_lo"]
-    alg["cv"]["N_F_max"]
-    ...
+    assert camera in ("L", "R"), "camera must be 'L' or 'R'"
+
+    cam_key = _camera_key(camera)
+    width, height = calib["camera_intrinsics"][cam_key]["size"]
+    grid_cols, grid_rows = alg["cv"]["grid_cells"]
+    N_feat_gl = int(alg["cv"]["N_feat_gl"])
+    N_feat_lo = int(alg["cv"]["N_feat_lo"])
+    min_dist  = float(alg["cv"]["min_distance_px"])
+
+    existing_pixels = _current_pixels(existing, camera)
+    filtered = _filter_near_existing(pool, existing_pixels, min_dist, width, height)
+
+    # Top N_feat_gl globally (filtered preserves response-sort from detect_keypoints)
+    selected  = filtered[:N_feat_gl]
+    remaining = filtered[N_feat_gl:]
+
+    # Top N_feat_lo per cell from the leftovers
+    cells = _bin_into_grid(remaining, width, height, grid_rows, grid_cols)
+    for row in range(grid_rows):
+        for col in range(grid_cols):
+            selected.extend(cells[row][col][:N_feat_lo])
+
+    return selected
 
 
 def focus_select_interest(pool: list[cv.KeyPoint],
                           focus_B: np.ndarray,
                           sigma_F: float,
                           existing: PointSet,
-                          calib: dict, alg: dict, camera: "str"
+                          calib: dict, alg: dict, camera: str
                           ) -> list[cv.KeyPoint]:
-    """Allocate interest points around the focus projection per camera.
+    """Allocate interest points around the focus projection.
 
-    focus_B : (3,) focus point F_{k-1} in body frame
-    sigma_F : Gaussian spread
-
-    Projects focus into the camera ("L" or "R"), builds a truncated 2D Gaussian over
-    the grid centred on the projection, allocates floor(N_I/2 · p_g) per
-    cell with residual to the peak. Within each cell the top-by-response
-    keypoints are picked (See paper for details).
-    Don't select existing points.
+    The focus point F_{k-1} projects to a pixel f_c in `camera`. A 2D
+    isotropic Gaussian N(f_c, sigma_F·I) is defined over the image plane.
+    Each grid cell's weight is the probability mass of that Gaussian
+    over the cell rectangle (X ⊥ Y, so it factors into CDF differences
+    in x and y). Re-normalized to the mass over the image rectangle.
+    Allocation per cell is floor(N · w_g). When a cell
+    cannot fulfil its allocation (insufficient keypoints), the residual
+    spills to other cells in weight-descending order — peak first, then
+    outward.
     """
-    alg["cv"]["grid_cells"]
-    calib["camera_intrinsics"]["size"]
-    project_point
-    alg["cv"]["N_I_max"]
+    assert camera in ("L", "R"), "camera must be 'L' or 'R'"
+
+    cam_key = _camera_key(camera)
+    width, height       = calib["camera_intrinsics"][cam_key]["size"]
+    grid_cols, grid_rows = alg["cv"]["grid_cells"]
+    N        = int(alg["cv"]["N_I_max"]) // 2
+    min_dist = float(alg["cv"]["min_distance_px"])
+
+    # Project focus into camera image plane
+    focus_pixel = np.asarray(project_point(jnp.asarray(focus_B), calib, camera))[0]
+    mu_x, mu_y = float(focus_pixel[0]), float(focus_pixel[1])
+    sigma = float(sigma_F)
+
+    # Filter pool against existing trackers, bin into grid
+    existing_pixels = _current_pixels(existing, camera)
+    filtered = _filter_near_existing(pool, existing_pixels, min_dist, width, height)
+    cells = _bin_into_grid(filtered, width, height, grid_rows, grid_cols)
+
+    # Per-cell weight = P(cell) under N(f_c, σ²·I), renormalised over the
+    # image rectangle. Since X ⊥ Y, P(cell) factors and so does the
+    # normaliser: Z = P(0 ≤ X ≤ W) · P(0 ≤ Y ≤ H) = Z_x · Z_y.
+    x_edges = np.linspace(0.0, width,  grid_cols + 1)
+    y_edges = np.linspace(0.0, height, grid_rows + 1)
+    Z_x = norm.cdf(width,  loc=mu_x, scale=sigma) - norm.cdf(0.0, loc=mu_x, scale=sigma)
+    Z_y = norm.cdf(height, loc=mu_y, scale=sigma) - norm.cdf(0.0, loc=mu_y, scale=sigma)
+    p_x = np.diff(norm.cdf(x_edges, loc=mu_x, scale=sigma)) / Z_x   # (grid_cols,)
+    p_y = np.diff(norm.cdf(y_edges, loc=mu_y, scale=sigma)) / Z_y   # (grid_rows,)
+    weights = np.outer(p_y, p_x)                                    # (grid_rows, grid_cols)
+
+    # Allocation
+    alloc = np.floor(N * weights).astype(int)
+
+    # First pass: take up to alloc[r,c] from each cell, top-by-response.
+    # (cells[r][c] is response-descending because pool came in that order.)
+    selected: list[cv.KeyPoint] = []
+    taken = np.zeros((grid_rows, grid_cols), dtype=int)
+    for r in range(grid_rows):
+        for c in range(grid_cols):
+            n_take = min(int(alloc[r, c]), len(cells[r][c]))
+            selected.extend(cells[r][c][:n_take])
+            taken[r, c] = n_take
+
+    # Spillover: distribute the remaining budget by weight-descending
+    # order. Under an isotropic Gaussian this is peak-first then outward.
+    remaining = N - len(selected)
+    if remaining > 0:
+        order = np.argsort(weights.flatten())[::-1]
+        for idx in order:
+            if remaining == 0:
+                break
+            r, c = np.unravel_index(idx, weights.shape)
+            available = len(cells[r][c]) - taken[r, c]
+            if available <= 0:
+                continue
+            n_extra = min(remaining, available)
+            start = taken[r, c]
+            selected.extend(cells[r][c][start:start + n_extra])
+            taken[r, c] += n_extra
+            remaining -= n_extra
+
+    return selected
+
+
+def _current_pixels(points: PointSet, camera: str) -> np.ndarray:
+    """Return current-frame pixels already occupied in one camera."""
+    pixels = []
+    for point in points:
+        keypoint = point.uL_curr if camera == "L" else point.uR_curr
+        if keypoint is not None:
+            pixels.append(keypoint.pt)
+
+    return np.asarray(pixels, dtype=float).reshape(-1, 2)
+
+def _filter_near_existing(pool: list[cv.KeyPoint],
+                          existing_pixels: np.ndarray,
+                          min_dist: float,
+                          width: int, height: int
+                          ) -> list[cv.KeyPoint]:
+    """Drop out-of-image and too-close-to-existing keypoints. Preserves order."""
+    out = []
+    for kp in pool:
+        x, y = kp.pt
+        if not (0 <= x < width and 0 <= y < height):
+            continue
+        if existing_pixels.shape[0] > 0:
+            dists = np.linalg.norm(existing_pixels - np.asarray(kp.pt), axis=1)
+            if np.any(dists < min_dist):
+                continue
+        out.append(kp)
+    return out
+
+def _bin_into_grid(pool: list[cv.KeyPoint],
+                   width: int, height: int,
+                   grid_rows: int, grid_cols: int
+                   ) -> list[list[list[cv.KeyPoint]]]:
+    """Bucket keypoints by image grid cell. Preserves order within each cell."""
+    cells = [[[] for _ in range(grid_cols)] for _ in range(grid_rows)]
+    cell_width  = width  / grid_cols
+    cell_height = height / grid_rows
+    for kp in pool:
+        x, y = kp.pt
+        col = min(int(x // cell_width),  grid_cols - 1)
+        row = min(int(y // cell_height), grid_rows - 1)
+        cells[row][col].append(kp)
+    return cells
 
 # =============================================================================
 # Stereo matching — NCC (§sec:cv)
@@ -241,45 +390,156 @@ def stereo_match(image_src: MatLike, image_dst: MatLike,
     """NCC stereo match each src keypoint along its epipolar line in dst.
 
     direction ∈ {"L→R", "R→L"}: which image is source, which is target.
-    For rectified stereo (ZJU bag) the epipolar line is a horizontal row,
-    so search reduces to 1D along v = v_src.
+    For rectified stereo the epipolar line is a horizontal row, so the
+    search reduces to 1D along v = v_src.
 
-    Returns a dict mapping the index in `keypoints_src` to the matched
-    cv.KeyPoint in dst, or None if NCC peak below threshold. Sub-pixel
+    Uses cv.matchTemplate with TM_CCOEFF_NORMED — the zero-mean
+    normalised cross-correlation per §sec:cv eq:NCC. Sub-pixel
     refinement by parabolic peak fitting on the NCC response.
 
-    NCC threshold and search-window parameters from algorithm.yaml.
+    Returns a dict {idx → cv.KeyPoint | None} mapping each
+    keypoints_src index to its match in dst, None if peak < ncc_min or
+    if bounds make matching infeasible.
     """
-    alg["cv"]["disp_min"]
-    alg["cv"]["disp_max"]
-    alg["cv"]["stereo_subpix"]
-    alg["cv"]["ncc_min"]
-    alg["cv"]["ncc_patch_size"]
-    ...
+    if direction not in ("L→R", "R→L"):
+        raise ValueError(f"direction must be 'L→R' or 'R→L', got {direction!r}")
 
+    disp_min       = float(alg["cv"]["disp_min"])
+    disp_max       = float(alg["cv"]["disp_max"])
+    stereo_subpix  = bool(alg["cv"]["stereo_subpix"])
+    ncc_min        = float(alg["cv"]["ncc_min"])
+    patch_size     = int(alg["cv"]["ncc_patch_size"])
+    half           = patch_size // 2
+
+    h_src, w_src = image_src.shape[:2]
+    h_dst, w_dst = image_dst.shape[:2]
+
+    matches: dict[int, cv.KeyPoint | None] = {}
+    for idx, kp_src in enumerate(keypoints_src):
+        u_src, v_src = kp_src.pt
+        u_int = int(round(u_src))
+        v_int = int(round(v_src))
+
+        # Template bounds in src
+        if (u_int - half < 0 or u_int + half >= w_src
+                or v_int - half < 0 or v_int + half >= h_src):
+            matches[idx] = None
+            continue
+
+        # Disparity range → column search bounds in dst
+        if direction == "L→R":
+            u_lo = u_src - disp_max
+            u_hi = u_src - disp_min
+        else:
+            u_lo = u_src + disp_min
+            u_hi = u_src + disp_max
+        u_lo_int = max(half,             int(np.floor(u_lo)))
+        u_hi_int = min(w_dst - 1 - half, int(np.ceil(u_hi)))
+        if u_hi_int < u_lo_int:
+            matches[idx] = None
+            continue
+
+        template = image_src[v_int - half:v_int + half + 1,
+                             u_int - half:u_int + half + 1]
+        strip    = image_dst[v_int - half:v_int + half + 1,
+                             u_lo_int - half:u_hi_int + half + 1]
+
+        # Zero-mean normalised cross-correlation
+        response = cv.matchTemplate(strip, template, cv.TM_CCOEFF_NORMED)
+        ncc = response[0]                                       # (N,)
+
+        peak_idx = int(np.argmax(ncc))
+        peak_ncc = float(ncc[peak_idx])
+        if np.isnan(peak_ncc) or peak_ncc < ncc_min:
+            matches[idx] = None
+            continue
+
+        u_peak = u_lo_int + peak_idx                           # integer
+
+        # Parabolic sub-pixel fit on 3 NCC values around the peak
+        if stereo_subpix and 0 < peak_idx < len(ncc) - 1:
+            y_m1 = float(ncc[peak_idx - 1])
+            y_0  = float(ncc[peak_idx])
+            y_p1 = float(ncc[peak_idx + 1])
+            denom = y_m1 - 2.0 * y_0 + y_p1
+            if abs(denom) > 1e-12:
+                offset = float(np.clip(0.5 * (y_m1 - y_p1) / denom, -1.0, 1.0))
+                u_refined = u_peak + offset
+            else:
+                u_refined = float(u_peak)
+        else:
+            u_refined = float(u_peak)
+
+        matches[idx] = cv.KeyPoint(u_refined, float(v_src),
+                                   kp_src.size, kp_src.angle,
+                                   kp_src.response, kp_src.octave,
+                                   kp_src.class_id)
+    return matches
 
 # =============================================================================
 # Stereo depth and covariance (§sec:depth_estimation)
 # =============================================================================
 
-def reconstruct_depth(points: PointSet,
-                      calib:  dict
-                      ) -> PointSet:
-    """Triangulate current (u_L, u_R) pixel pairs into a body-frame 3D point.
-        Only do so for points without 3D point data.
-    For rectified stereo:  Z = b·fx / (uL.x − uR.x)
-                            X = (uL.x − cx) · Z / fx
-                            Y = (uL.y − cy) · Z / fy
-    Then transform from left-camera frame into body frame via T_BL.
+def reconstruct_depth(points: PointSet, calib: dict, alg: dict) -> PointSet:
+    """Triangulate (u_L, u_R) pairs into body-frame 3D points (§sec:depth_estimation).
+    For each point with stereo pixels but no p_curr yet.
 
-    Add (p_B, Σ_p) to the stereo points in the pointset.
-    Where Σ_p is the 3×3 position covariance from
-    propagating σ_px² (calibration.yaml) through the triangulation
-    Jacobian. 
-    
+    Distortion is not currently supported; raises NotImplementedError if
+    non-zero distortion coefficients are present. Points without stereo
+    pairs are left unchanged.
+
+    Mutates `points` in place; returns the same PointSet for chaining.
     """
-    ...
+    dist_coeff = np.asarray(calib["camera_intrinsics"]["left"]["dist_coeff"])
+    if np.any(dist_coeff != 0.0):
+        raise NotImplementedError("Non-zero distortion not supported in reconstruct_depth.")
 
+    K_L = np.asarray(calib["camera_intrinsics"]["left"]["k_matrix"])
+    fu, fv = K_L[0, 0], K_L[1, 1]
+    cu, cv_c = K_L[0, 2], K_L[1, 2]
+    baseline = float(calib["camera_extrinsics"]["baseline"])
+    fb = baseline * fu
+
+    T_LB = np.asarray(calib["camera_extrinsics"]["left"]["cog_cam"])
+    R_BL = T_LB[:3, :3].T
+    t_L  = T_LB[:3,  3]
+
+    var_sigma_px = float(alg["cv"]["var_sigma_px"])
+    
+    inv_fu, inv_fv = 1.0 / fu, 1.0 / fv
+
+    for point in points:
+        if point.p_curr is not None:
+            continue
+        if point.uL_curr is None or point.uR_curr is None:
+            continue
+
+        uLx, uLy = point.uL_curr.pt
+        uRx      = point.uR_curr.pt[0]
+        disparity = uLx - uRx
+       
+        # Camera-frame point
+        x_n = (uLx - cu) * inv_fu        # no distortion → x_n = x_d
+        y_n = (uLy - cv_c) * inv_fv
+        Z = fb / disparity
+        p_c = np.array([x_n * Z, y_n * Z, Z], dtype=float)
+
+        # Triangulation Jacobian ∂p^c / ∂(u_L, v_L, u_R) (eq:Jpc_stereo)
+        # No distortion → C = diag(1/f_u, 1/f_v).
+        inv_d = 1.0 / disparity
+        J = Z * np.array([
+            [inv_fu - x_n * inv_d,  0.0,    x_n * inv_d],
+            [-y_n * inv_d,          inv_fv, y_n * inv_d],
+            [-inv_d,                0.0,    inv_d],
+        ])
+
+        Sigma_pc = var_sigma_px * (J @ J.T)
+        Sigma_pB = R_BL @ Sigma_pc @ R_BL.T
+
+        point.p_curr = R_BL @ (p_c - t_L)
+        point.Sigma_curr = Sigma_pB
+
+    return points
 
 # =============================================================================
 # Temporal matching (§sec:search_region)

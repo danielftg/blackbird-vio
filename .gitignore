@@ -198,6 +198,10 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# Local project files that should not be committed
+Quadcopter_Project.pdf
+TODO.txt
+
 # pytype static type analyzer
 .pytype/
 
