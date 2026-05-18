@@ -16,6 +16,66 @@ import jaxlie
 
 log = logging.getLogger(__name__)
 
+def _plot_trajectory(merged: pd.DataFrame, output_path: Path) -> None:
+    """Side-by-side trajectory plot: estimated vs ground truth."""
+    fig = plt.figure(figsize=(16, 6))
+    
+    # 3D trajectory
+    ax = fig.add_subplot(121, projection='3d')
+    ax.plot(merged['x_est'], merged['y_est'], merged['z_est'],
+            'b-', linewidth=1.5, label='Estimated', alpha=0.85)
+    ax.plot(merged['x_gt'],  merged['y_gt'],  merged['z_gt'],
+            'g--', linewidth=1.5, label='Ground truth', alpha=0.85)
+    ax.scatter(merged['x_est'].iloc[0], merged['y_est'].iloc[0],
+               merged['z_est'].iloc[0], c='blue', s=80, marker='o', label='Start')
+    ax.scatter(merged['x_est'].iloc[-1], merged['y_est'].iloc[-1],
+               merged['z_est'].iloc[-1], c='red',  s=80, marker='x', label='End')
+    ax.set_xlabel('x [m]'); ax.set_ylabel('y [m]'); ax.set_zlabel('z [m]')
+    ax.set_title('3D Trajectory')
+    ax.legend()
+    
+    # Per-axis time series
+    ax2 = fig.add_subplot(322)
+    t_s = merged['timestamp_s_est']
+    for axis, color in [('x', 'red'), ('y', 'green'), ('z', 'blue')]:
+        ax2.plot(t_s, merged[f'{axis}_est'], color=color, linewidth=1.0,
+                 label=f'{axis} est', alpha=0.85)
+        ax2.plot(t_s, merged[f'{axis}_gt'],  color=color, linewidth=1.0,
+                 linestyle='--', alpha=0.7)
+    ax2.set_ylabel('Position [m]')
+    ax2.set_title('Per-axis position (solid=est, dashed=gt)')
+    ax2.legend(ncol=3, fontsize=8)
+    ax2.grid(True, alpha=0.3)
+    
+    # Velocity time series  
+    ax3 = fig.add_subplot(324)
+    for axis, color in [('x', 'red'), ('y', 'green'), ('z', 'blue')]:
+        ax3.plot(t_s, merged[f'v{axis}_est'], color=color, linewidth=1.0,
+                 label=f'v{axis} est', alpha=0.85)
+        ax3.plot(t_s, merged[f'v{axis}_gt'],  color=color, linewidth=1.0,
+                 linestyle='--', alpha=0.7)
+    ax3.set_ylabel('Velocity [m/s]')
+    ax3.set_title('Body-frame velocity (solid=est, dashed=gt)')
+    ax3.legend(ncol=3, fontsize=8)
+    ax3.grid(True, alpha=0.3)
+    
+    # Angular velocity time series
+    ax4 = fig.add_subplot(326)
+    for axis, color in [('x', 'red'), ('y', 'green'), ('z', 'blue')]:
+        ax4.plot(t_s, merged[f'w{axis}_est'], color=color, linewidth=1.0,
+                 label=f'w{axis} est', alpha=0.85)
+        ax4.plot(t_s, merged[f'w{axis}_gt'],  color=color, linewidth=1.0,
+                 linestyle='--', alpha=0.7)
+    ax4.set_xlabel('Time [s]')
+    ax4.set_ylabel('Angular velocity [rad/s]')
+    ax4.set_title('Body-frame angular velocity')
+    ax4.legend(ncol=3, fontsize=8)
+    ax4.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
 
 def evaluate(results_path: Path,
              ground_truth_path: Path) -> dict:
@@ -56,6 +116,8 @@ def evaluate(results_path: Path,
     
     # Align by timestamp_ns
     merged = pd.merge(results, gt, on='timestamp_ns', suffixes=('_est', '_gt'))
+    log.info(f"Aligned {len(merged)}/{len(results)} frames "
+         f"({len(results) - len(merged)} unmatched timestamps)")
     if len(merged) == 0:
         log.error("No matching timestamps between results and ground truth")
         return {}
@@ -119,6 +181,8 @@ def evaluate(results_path: Path,
     
     # Compute RMSE metrics
     trans_rmse = np.sqrt(np.mean(trans_errors**2))
+    trans_p50  = np.median(trans_errors)
+    trans_p95  = np.percentile(trans_errors, 95)   
     rot_rmse = np.sqrt(np.mean(rot_angle_errors**2))
     vel_rmse_x = np.sqrt(np.mean(vel_errors[:, 0]**2))
     vel_rmse_y = np.sqrt(np.mean(vel_errors[:, 1]**2))
@@ -128,10 +192,10 @@ def evaluate(results_path: Path,
     angvel_rmse_y = np.sqrt(np.mean(angvel_errors[:, 1]**2))
     angvel_rmse_z = np.sqrt(np.mean(angvel_errors[:, 2]**2))
     angvel_mag_rmse = np.sqrt(np.mean(angvel_mag_errors**2))
-    
+ 
     # Log summary
     log.info("=== Error Metrics ===")
-    log.info(f"Translation RMSE:        {trans_rmse:.6f} m")
+    log.info(f"Translation: RMSE={trans_rmse:.4f}, median={trans_p50:.4f}, p95={trans_p95:.4f} m")
     log.info(f"Rotation RMSE:           {rot_rmse:.6f} rad ({np.degrees(rot_rmse):.4f}°)")
     log.info(f"Velocity magnitude RMSE: {vel_mag_rmse:.6f} m/s")
     log.info(f"  - vx RMSE:             {vel_rmse_x:.6f} m/s")
@@ -225,6 +289,10 @@ def evaluate(results_path: Path,
     plt.savefig(plot_path, dpi=150)
     log.info(f"Saved plot to {plot_path}")
     plt.close()
+    
+    traj_path = results_path.parent / f"{results_path.stem}_trajectory.png"
+    _plot_trajectory(merged, traj_path)
+    log.info(f"Saved trajectory plot to {traj_path}")
     
     # Return summary metrics
     metrics = {
