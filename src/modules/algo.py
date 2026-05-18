@@ -8,6 +8,7 @@ Implements the pseudocode in §sec:algorithm_overview as a single class.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from itertools import chain
+import logging 
 import numpy as np
 import jax.numpy as jnp
 import jaxlie
@@ -25,11 +26,12 @@ from .solver  import Solver, JointState
 from .stats   import feature_nis_gate, joint_consistency, admission_velocity_gate
 from cv2.typing import MatLike
 
+log = logging.getLogger(__name__)
 
 # =============================================================================
 # Accumulator container
 # =============================================================================
-
+    
 @dataclass
 class Accumulator:
     """Algorithm's internal state (§sec:algorithm_overview)."""
@@ -44,6 +46,7 @@ class Accumulator:
     focus_prev:         np.ndarray=None
     focus_sigma_prev:   float=None 
     t_prev:             float=None 
+    reject_ids:         list[int]=field(default_factory=lambda: [])
 
 
 # =============================================================================
@@ -183,6 +186,8 @@ class Algo:
             id = self.id_gen.next()
             accum.F_pre.add(Point(id, uL_curr=kp_pair[0], uR_curr=kp_pair[1]))
 
+        log.debug(f"Number of interest points: {len(self.accum.I)}. Number of non-admitted feature points: {len(self.accum.F_pre)}.")
+
         accum.I = reconstruct_depth(accum.I, calib, alg)
         accum.F_pre = reconstruct_depth(accum.F_pre, calib, alg)
     
@@ -210,7 +215,7 @@ class Algo:
         accum = self.accum
         calib = self.calib
         alg = self.alg 
-
+        
         # ---- Receive and propagate ---------------------------------------
         delta_t = t_k - accum.t_prev
         prop_state_matrix = accum.EKF.propagate(u_km1, delta_t)
@@ -261,10 +266,10 @@ class Algo:
                 calib, alg,
                 "R→L"
                 )
-
+        
         # ---- EKF update --------------------------------------------------
         upd_state_matrix = self._ekf_update()
-
+        
 
         # ---- Post-update relative pose -----------------------------------
         # Compute (ΔT⁺, Σ_Δξ⁺) from T̂_{k-1}^+ and T̂_k^+. 
@@ -284,9 +289,11 @@ class Algo:
         # Stage-2 points in F_pre ∪ I: classify PixelType, solve with the
         # post-update pose prior, transport per-point states/covariances
         # to B_k, write back to Point objects.
+        
         sol_dT, covar_dT = self._solve_joint(
             delta_t, delta_T, covar_delta_T, w_cands
         )
+        
         
 
         # ---- Feature admission -------------------------------------------
@@ -297,7 +304,7 @@ class Algo:
         
         # ---- Replenish ------------------------------------------------
         I_hit_limit, F_hit_limit = self._replenish(L_k, R_k, key_L, key_R, F_km1, sigma_F_km1)     
-
+        
 
         # ---- Output ------------------------------------------------------
         # Strip feature rows from EKF state/covariance for X_core / P_core.
@@ -319,11 +326,12 @@ class Algo:
 
         to_drop = list(I_hit_limit.ids())
         for id in to_drop: self.accum.I.discard(id)
+        for id in self.accum.reject_ids: self.accum.I.discard(id)
         to_drop = list(F_hit_limit.ids())
         for id in to_drop: 
             self.accum.F.discard(id)
             self.accum.EKF.marginalise(id)
-
+        self.accum.reject_ids = []
         return out
 
     # =====================================================================
@@ -358,12 +366,15 @@ class Algo:
         
         for id in no_match: 
             if id in self.accum.I:
+                log.debug(f"Failed to temporal match interest point: {id}")
                 self.accum.I.discard(id)
                 continue
             if id in self.accum.F_pre:
+                log.debug(f"Failed to temporal match non-admitted feature point: {id}")
                 self.accum.F_pre.discard(id)
                 continue
             if id in self.accum.F:
+                log.debug(f"Failed to temporal match feature point: {id}")
                 self.accum.F.discard(id)
                 self.accum.EKF.marginalise(id)
         return cands 
@@ -408,6 +419,7 @@ class Algo:
             for id in moving:
                 accum.EKF.marginalise(id)
                 p = accum.F.remove(id)
+                self.accum.reject_ids.append(id)
                 accum.I.add(p)
             
             if any_points(accum.F):
@@ -419,6 +431,7 @@ class Algo:
                     for id in to_drop:
                         accum.EKF.marginalise(id)
                         p = accum.F.remove(id)
+                        self.accum.reject_ids.append(id)
                         accum.I.add(p)
                 else:
                     accum.EKF.add_pixel_measurements(accum.F)
@@ -449,6 +462,9 @@ class Algo:
         to F (augment EKF), fails to I."""
 
         admit_ids, reject_ids = admission_velocity_gate(self.accum.F_pre, self.alg)
+        
+        self.accum.reject_ids.extend(reject_ids)
+
         self.accum.F_pre.move_to(self.accum.F, admit_ids)
         self.accum.F_pre.move_to(self.accum.I, reject_ids)
         for id in admit_ids: self.accum.EKF.augment(self.accum.F.get(id))
@@ -468,7 +484,8 @@ class Algo:
         # stage-1 stereo triangulation for new stereo points.
         
         focus_changed = (not np.allclose(self.accum.focus_prev, F_km1)) or (not np.isclose(self.accum.focus_sigma_prev, sigma_F_km1))
-        
+        log.debug(f"Focus changed: {focus_changed}")
+
         N_I = len(self.accum.I)
         N_F = len(self.accum.F)
         
@@ -491,9 +508,16 @@ class Algo:
         I_ign = len(I_hit_limit)
         F_ign = len(F_hit_limit)
         
-        N_I_repl = N_I_max - (N_I - I_ign) + I_pre_empt 
+        N_I_repl = N_I_max - (N_I - I_ign) + I_pre_empt + len(self.accum.reject_ids)
         N_F_repl = N_F_max - (N_F - F_ign) + F_pre_empt
 
+        log.debug(f"Max Interest points: {N_I_max}. Number of interest points: {N_I}. Interest points ending this frame: {I_ign}. Interest points ending next frame: {I_pre_empt}")
+        _log_pixel_type_counts("Interest", self.accum.I)
+        log.info(f"Max Feature points: {N_F_max}. Number of feature points: {N_F}. Feature points ending this frame: {F_ign}. Feature points ending next frame: {F_pre_empt}")
+        _log_pixel_type_counts("Features", self.accum.F) 
+
+        log.info(f"Interest points to replenish: {N_I_repl}, Feature points to replenish: {N_F_repl}")
+        
         if focus_changed:
             raise NotImplementedError("focus change handling not yet implemented")
 
@@ -590,6 +614,7 @@ class Algo:
         # F_pre and I — solver output (stage-2) or stereo triangulation (stage-1)
         for role, pset in (('F_pre', self.accum.F_pre), ('I', self.accum.I)):
             for p in pset:
+                log.debug(f"Role: {role}. Point {p}.")
                 if p.p_curr is None:
                     continue
                 stage = -2 if p.v_curr is not None else -1
@@ -682,4 +707,8 @@ class Algo:
             camera 
             )
 
-    
+def _log_pixel_type_counts(label: str, pset: PointSet) -> None:
+    """Log per-pixel-type counts in a PointSet."""
+    counts = {t: len(pset.filter(lambda p, t=t: p.get_px_type() == t))
+            for t in PixelType}
+    log.debug(f"{label}: " + ", ".join(f"N_{t.name}={counts[t]}" for t in PixelType))

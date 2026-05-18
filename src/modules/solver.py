@@ -212,18 +212,18 @@ class Solver:
                 v_init = np.asarray(cand.v_p, dtype=np.float64).reshape(3)
                 s_i = np.concatenate([p_init, v_init])
 
-        s_blocks.append(s_i)
-        point_ids.append(p.id)
-        corr_types.append(corr)
-        offsets.append(offset)
-        offset += s_i.shape[0]
-        self._z[p.id] = jnp.asarray(z_i)
+            s_blocks.append(s_i)
+            point_ids.append(p.id)
+            corr_types.append(corr)
+            offsets.append(offset)
+            offset += s_i.shape[0]
+            self._z[p.id] = jnp.asarray(z_i)
 
-        # Stash priors (only after the point is committed)
-        if prior_kml is not None:
-            self._priors_kml[p.id] = prior_kml
-        if prior_k is not None:
-            self._priors_k[p.id] = prior_k
+            # Stash priors (only after the point is committed)
+            if prior_kml is not None:
+                self._priors_kml[p.id] = prior_kml
+            if prior_k is not None:
+                self._priors_k[p.id] = prior_k
 
         s_flat = jnp.asarray(np.concatenate(s_blocks)) if s_blocks else jnp.zeros(0)
         self._x = JointState(
@@ -662,6 +662,9 @@ class Solver:
         mm_d_perp_Bk   = Sigma_Bk["mm_d_perp_Bk"]
         point_map      = {p.id: p for p in points}
 
+        log.debug(f"Point map length: {len(point_map)}")
+        log.debug(f"Points in solver state: {x_Bk.point_ids}")
+
         for i, pid in enumerate(x_Bk.point_ids):
             if pid not in point_map:
                 continue
@@ -677,6 +680,7 @@ class Solver:
                 p.v_curr = float(s_i[3]) * mm_d_perp_Bk[pid]
             else:
                 p.v_curr = s_i[3:6]
+            
+            log.debug(f"\nSolver wrote the following too {pid}: Point: {p.p_curr}.\n Vel: {p.v_curr}.\n Sigma: {p.Sigma_curr}\n")
 
-            if np.any(np.isnan(p.p_curr)) or np.any(np.isnan(p.Sigma_curr)) or np.any(np.isnan(p.v_curr)):
-                log.debug(f"Point: {p} has nan in one of p_Bk={p.p_curr}, v_p={p.v_curr} or Sigma={p.Sigma_curr}")
+            

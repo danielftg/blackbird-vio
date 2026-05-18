@@ -16,6 +16,51 @@ import jaxlie
 
 log = logging.getLogger(__name__)
 
+def _plot_state_diagnostics(results: pd.DataFrame, output_path: Path) -> None:
+    """Estimator state diagnostics: gravity, disturbance, point counts."""
+    fig, axes = plt.subplots(3, 1, figsize=(14, 10))
+    t_s = results['timestamp_s']
+    g_norm_nominal = 9.7935   # from ekf_meas.g_norm; consistent with calib
+
+    # Gravity vector — per-axis + magnitude
+    ax = axes[0]
+    for axis, color in [('x', 'red'), ('y', 'green'), ('z', 'blue')]:
+        ax.plot(t_s, results[f'g{axis}'], color=color, linewidth=1.0,
+                label=f'g{axis}', alpha=0.85)
+    g_mag = np.sqrt(results['gx']**2 + results['gy']**2 + results['gz']**2)
+    ax.plot(t_s, g_mag, 'k-', linewidth=1.5, label='‖g‖', alpha=0.9)
+    ax.axhline(y=g_norm_nominal, color='gray', linestyle='--', alpha=0.5,
+               label=f'nominal ({g_norm_nominal:.4f})')
+    ax.set_ylabel('Gravity [m/s²]')
+    ax.set_title('Body-frame gravity estimate')
+    ax.legend(ncol=5, fontsize=8); ax.grid(True, alpha=0.3)
+
+    # Disturbance
+    ax = axes[1]
+    for axis, color in [('x', 'red'), ('y', 'green'), ('z', 'blue')]:
+        ax.plot(t_s, results[f'd{axis}'], color=color, linewidth=1.0,
+                label=f'd{axis}', alpha=0.85)
+    d_mag = np.sqrt(results['dx']**2 + results['dy']**2 + results['dz']**2)
+    ax.plot(t_s, d_mag, 'k-', linewidth=1.5, label='‖d‖', alpha=0.9)
+    ax.axhline(y=0, color='gray', linestyle='-', alpha=0.3)
+    ax.set_ylabel('Disturbance [m/s²]')
+    ax.set_title('Body-frame disturbance estimate')
+    ax.legend(ncol=4, fontsize=8); ax.grid(True, alpha=0.3)
+
+    # Point counts
+    ax = axes[2]
+    ax.plot(t_s, results['n_F'],     'b-', linewidth=1.2, label='F (EKF features)')
+    ax.plot(t_s, results['n_F_pre'], 'g-', linewidth=1.2, label='F_pre (pre-admission)')
+    ax.plot(t_s, results['n_I'],     'r-', linewidth=1.2, label='I (interest)')
+    ax.set_xlabel('Time [s]')
+    ax.set_ylabel('Count')
+    ax.set_title('Point-set sizes per frame')
+    ax.legend(ncol=3, fontsize=9); ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
 def _plot_trajectory(merged: pd.DataFrame, output_path: Path) -> None:
     """Side-by-side trajectory plot: estimated vs ground truth."""
     fig = plt.figure(figsize=(16, 6))
@@ -295,6 +340,11 @@ def evaluate(results_path: Path,
     traj_path = results_path.parent / f"{results_path.stem}_trajectory.png"
     _plot_trajectory(merged, traj_path)
     log.info(f"Saved trajectory plot to {traj_path}")
+    
+
+    diag_path = results_path.parent / f"{results_path.stem}_diagnostics.png"
+    _plot_state_diagnostics(results, diag_path)
+    log.info(f"Saved diagnostics plot to {diag_path}")
     
     # Return summary metrics
     metrics = {

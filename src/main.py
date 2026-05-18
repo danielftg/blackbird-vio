@@ -9,6 +9,16 @@ Usage example:
     python main.py [--data DIR] [--results PATH] [--limit N]
 """
 
+import os
+
+N = "4"
+os.environ["OMP_NUM_THREADS"]      = N
+os.environ["OPENBLAS_NUM_THREADS"] = N
+os.environ["MKL_NUM_THREADS"]      = N
+os.environ["NUMEXPR_NUM_THREADS"]  = N
+os.environ["VECLIB_MAXIMUM_THREADS"] = N
+os.environ["XLA_FLAGS"] = "--xla_cpu_multi_thread_eigen=true intra_op_parallelism_threads=4"
+
 import argparse
 from pathlib import Path
 import logging

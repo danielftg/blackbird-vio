@@ -21,8 +21,8 @@ signif:                                # significance levels (∈ (0, 1))
 
 cv:                                    # computer vision parameters
   # ---- feature counts ---------------------------------------------------
-  N_F_max:         50                  # max features tracked simultaneously
-  N_I_max:         200                 # max interest points evaluated per
+  N_F_max:         50                   # max features tracked simultaneously
+  N_I_max:         200                  # max interest points evaluated per
                                         # frame (before allocation/pruning)
   N_feat_gl:       80                   # global feature target across image
   N_feat_lo:       6                    # local feature target per grid cell
