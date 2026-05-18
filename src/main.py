@@ -27,9 +27,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--results",     type=Path, default=Path("output/results.csv"))
     p.add_argument("--limit",       type=int,  default=None,
                    help="Process only the first N frames (debugging)")
-    p.add_argument("--fetch_vid",    action="store_true",
+    p.add_argument("--fetch_vid",    action="store_true", default=False,
                    help="Run fetch_vid before estimation starts")
-    p.add_argument("--evaluate",    action="store_true",
+    p.add_argument("--evaluate",    action="store_true", default=False, 
                    help="Run eval after estimation completes")
     p.add_argument("--log-level",   default="INFO")
     return p.parse_args()
@@ -93,6 +93,7 @@ def main() -> None:
         args.results.unlink()                  # fresh start each run
 
     for k, (path_L, path_R) in enumerate(pairs):
+        log.info("frame %d / %d", k, len(pairs))
         L = util.load_image(path_L)
         R = util.load_image(path_R)
 
@@ -107,9 +108,8 @@ def main() -> None:
             u_km1 = motor.iloc[k - 1][motor_cols].to_numpy(dtype=np.float64)
             output = estimator.iter(L, R, t_k, u_km1, F_default, sigma_F)
 
-        if k % 100 == 0:
-            log.info("frame %d / %d", k, len(pairs))
-
+        
+        
         # ---- write results --------------------------------------------------
         row = serialize_output(k, t_k_ns, output)
         pd.DataFrame([row]).to_csv(

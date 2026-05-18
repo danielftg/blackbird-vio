@@ -57,7 +57,7 @@ cv:                                    # computer vision parameters
   # ---- stereo matching --------------------------------------------------
   ncc_min:        0.8                  # Minimum NCC value for stereo matching
   ncc_patch_size: 15                   # Size of square matching patch
-  disp_min:       0.5                  # min disparity [px]. Avoid div-by-zero
+  disp_min:       1                    # min disparity [px]. Avoid div-by-zero
                                        # at infinity; enforces Z_max constraint
   disp_max:       128                  # max disparity [px]. Enforces Z_min
                                        # constraint at b·fx/disp_max
@@ -75,9 +75,7 @@ cv:                                    # computer vision parameters
                                        # assumed for inter-frame prediction
                                 
 solver:                                # stage-2 nonlinear solver (Gauss-Newton)
+  t_base_min:     1.0e-3               # m, minimum baseline for MM admission
   eps_tau:        1e-6                 # GN convergence threshold on ‖τ‖
+  eps_residual:   1e-9                 # ‖b‖ progress floor per iteration
   max_iters:      20                   # GN iteration cap
-  rel_tol:        1.0e-5               # relative cost decrease termination
-  abs_tol:        1.0e-7               # absolute cost termination
-  huber_delta:    1.5                  # Huber robust kernel threshold [px]
-                                       # (set to 0 to disable robustification)

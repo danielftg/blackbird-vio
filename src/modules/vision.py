@@ -19,6 +19,7 @@ Distinguishes two roles for "keypoints":
 from __future__ import annotations
 from dataclasses import dataclass
 from cv2.typing import MatLike
+import logging
 import cv2 as cv
 import numpy as np
 import jax.numpy as jnp
@@ -28,6 +29,7 @@ from scipy.stats import chi2,norm
 from .points import Point, PointSet, PixelType
 from .ekf import project_point
 
+log = logging.getLogger(__name__)
 
 # =============================================================================
 # Internal helpers
@@ -68,8 +70,10 @@ def _ellipsoid_samples(mean: np.ndarray, sigma: np.ndarray,
     sigma = np.asarray(sigma, dtype=np.float64)
     d = mean.shape[0]
     radius = np.sqrt(chi2.ppf(alpha, d))
-
-    eigvals, eigvecs = np.linalg.eigh(sigma)
+    try:
+        eigvals, eigvecs = np.linalg.eigh(sigma)
+    except np.linalg.LinAlgError as e:
+        raise np.linalg.LinAlgError(f"{e} for {sigma}")
     eigvals = np.clip(eigvals, 0.0, None)
 
     out = [mean.copy()]

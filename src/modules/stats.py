@@ -18,11 +18,13 @@ A future optimisation pass should eliminate the duplicate work.
 from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
+import logging 
 from scipy.stats import chi2
 
 from .points import PointSet
 from .ekf import Ekf
 
+log = logging.getLogger(__name__)
 
 # =============================================================================
 # Building block: chi-squared cutoff
@@ -203,7 +205,9 @@ def admission_velocity_gate(F_pre: PointSet,
                 continue
         
             res = np.linalg.solve(Sigma_v, v_hat)
+            
             if jnp.any(jnp.isnan(res)) or jnp.any(jnp.isinf(res)):
+                log.error(f"Point: {p} has issues sigma: {Sigma_v}, v_hat: {v_hat}")
                 gamma = float(v_hat.T @ (np.linalg.pinv(Sigma_v) @ v_hat))
             else:
                 gamma = float(v_hat.T @ res)

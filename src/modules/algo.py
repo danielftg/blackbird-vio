@@ -21,7 +21,7 @@ from .vision  import (
     temporal_match_one, temporal_match_one_feature,
     )
 from .ekf     import Ekf, CoreEkfState, EkfState, relative_pose
-from .solver  import Solver, JointState, CorrType
+from .solver  import Solver, JointState
 from .stats   import feature_nis_gate, joint_consistency, admission_velocity_gate
 from cv2.typing import MatLike
 
@@ -140,10 +140,9 @@ class Algo:
                 calib=calib, alg=alg,
                 direction="R→L"
         )
-
         #Build non-duplicate matches
-        I_kpts = [(I_L[idx],m) for idx, m in I_m_L_R]
-        I_kpts.extend([(m,I_R[idx]) for idx, m in I_m_R_L])
+        I_kpts = [(I_L[idx],m) for idx, m in I_m_L_R.items()]
+        I_kpts.extend([(m,I_R[idx]) for idx, m in I_m_R_L.items()])
         I_kpts = self._dedupe(I_kpts)
 
         #Build point set.
@@ -172,8 +171,8 @@ class Algo:
         ) 
         
         #Build lists of matches.
-        F_kpts = [(F_L[idx],m) for idx, m in F_m_L_R]
-        F_kpts.extend([(m,F_R[idx]) for idx, m in F_m_R_L])
+        F_kpts = [(F_L[idx],m) for idx, m in F_m_L_R.items()]
+        F_kpts.extend([(m,F_R[idx]) for idx, m in F_m_R_L.items()])
         F_kpts = self._dedupe(F_kpts)
 
         #Build point set.
@@ -277,12 +276,12 @@ class Algo:
             T_a, T_b
             ,covar_a, covar_b,
             prop_state_matrix, upd_state_matrix,
-            accum.X_prev.feature_ids, accum.EKF.feature_ids
+            accum.X_prev.feature_ids, accum.EKF.state.feature_ids
         )
 
 
         # ---- Joint solver ------------------------------------------------
-        # Stage-2 points in F_pre ∪ I: classify CorrType, solve with the
+        # Stage-2 points in F_pre ∪ I: classify PixelType, solve with the
         # post-update pose prior, transport per-point states/covariances
         # to B_k, write back to Point objects.
         sol_dT, covar_dT = self._solve_joint(
@@ -518,8 +517,8 @@ class Algo:
             )
 
             #Build non-duplicate matches
-            I_kpts = [(I_L[idx],m) for idx, m in I_m_L_R]
-            I_kpts.extend([(m,I_R[idx]) for idx, m in I_m_R_L])
+            I_kpts = [(I_L[idx],m) for idx, m in I_m_L_R.items()]
+            I_kpts.extend([(m,I_R[idx]) for idx, m in I_m_R_L.items()])
             I_kpts = self._dedupe(I_kpts)
 
             I_kpts.sort(key=lambda p: p[0] is None or p[1] is None)
@@ -548,8 +547,8 @@ class Algo:
                     calib=self.calib, alg=self.alg,
                     direction="R→L"
             ) 
-            F_kpts = [(F_L[idx],m) for idx, m in F_m_L_R]
-            F_kpts.extend([(m,F_R[idx]) for idx, m in F_m_R_L])
+            F_kpts = [(F_L[idx],m) for idx, m in F_m_L_R.items()]
+            F_kpts.extend([(m,F_R[idx]) for idx, m in F_m_R_L.items()])
             F_kpts = self._dedupe(F_kpts)
 
             F_kpts.sort(key=lambda p: p[0] is None or p[1] is None)

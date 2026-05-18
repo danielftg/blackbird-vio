@@ -18,10 +18,12 @@ from dataclasses import dataclass, field
 import numpy as np
 import jax.numpy as jnp
 import jaxlie
-
+import logging 
 from .points import Point, PointSet, PixelType
 from .vision import CandidateSample
 from .utils  import np_skew
+
+log = logging.getLogger(__name__)
 
 # =============================================================================
 # Joint state container
@@ -86,8 +88,10 @@ class Solver:
         self.inv_sigma = 1.0 / self.sigma_px
 
         # GN tolerances
-        self.eps_tau   = float(alg["solver"]["eps_tau"])
-        self.max_iters = int  (alg["solver"]["max_iters"])
+        self.eps_tau       = float(alg["solver"]["eps_tau"])
+        self.eps_residual  = float(alg["solver"]["eps_residual"])
+        self.max_iters     = int(alg["solver"]["max_iters"])
+        self.t_base_min    = float(alg["solver"]["t_base_min"])
 
         # Per-call state (cleared each initialise)
         self._x:           JointState | None = None
@@ -97,6 +101,8 @@ class Solver:
         self._Sigma_prior: np.ndarray | None = None
         self._L_prior:     np.ndarray | None = None  # Σ_prior^{-1/2}
         self._dt: float = 0.0
+        self._priors_kml: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        self._priors_k:   dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
     # ---- initialisation --------------------------------------------------
 
@@ -111,7 +117,7 @@ class Solver:
 
         Initial values:
           ΔT^0          = delta_T_prior
-          p_i^{B_{k-1}} = CandidateSample.p_Bkm1
+          p_i^{B_{k-1}} = p.p_prev, stereo triangulated or CandidateSample.p_Bkm1
           v_i^p         = CandidateSample.v_p   (3-vector for SS/SM/MS,
                                                   projection v_p · d_⊥
                                                   for MM, sign-preserving)
@@ -119,6 +125,13 @@ class Solver:
         Σ_prior taken as Σ_{Δξ} directly: J_r^{-1} ≈ I near identity
         for one frame at typical rates (§eq:DeltaXi_prior).
         """
+        log.debug(f"Solver initialised with; Pose prior: {delta_T_prior}, Pose Covariance: {Sigma_prior}")
+        if not np.all(np.isfinite(Sigma_prior)):
+            raise ValueError(f"Sigma_prior has non-finite entries: {Sigma_prior}")
+        eigs = np.linalg.eigvalsh(Sigma_prior)
+        if eigs.min() <= 0:
+            raise ValueError(f"Sigma_prior not positive definite (min eig {eigs.min():.2e})")
+        
         # Reset per-call state
         self._dt          = float(dt)
         self._prior_T     = delta_T_prior
@@ -126,6 +139,9 @@ class Solver:
         self._L_prior     = self._whitening(self._Sigma_prior)
         self._z           = {}
         self._mono_cam    = {}
+        self._priors_kml  = {}
+        self._priors_k    = {}
+
 
         s_blocks:   list[np.ndarray] = []
         point_ids:  list[int]        = []
@@ -140,21 +156,55 @@ class Solver:
                 continue
             
             cand = search_inits[p.id]
-            corr  = p.get_px_type()
+            corr = p.get_px_type()
 
-            z_i   = self._stack_measurement(p, corr)
+            z_i = self._stack_measurement(p, corr)
             if z_i is None:
                 continue
-            
+
             cam_m = self._mm_camera(p, corr)
             self._mono_cam[p.id] = cam_m
-            
-            if cand.p_Bk is not None and cand.p_Bkm1 is None:
-                cand.p_Bkm1 = T_k_to_km1.apply(jnp.asarray(cand.p_Bk))
-            p_init = np.asarray(cand.p_Bkm1, dtype=np.float64).reshape(3)
-            
+
+            # ---- Cascade: initial p_init + per-point prior ----
+            prior_kml: tuple | None = None
+            prior_k:   tuple | None = None
+
+            if p.p_prev is not None and p.Sigma_prev is not None:
+                # Previous joint solve: prior at k-1
+                p_init = np.asarray(p.p_prev, dtype=np.float64).reshape(3)
+                Sigma_pp = np.asarray(p.Sigma_prev, dtype=np.float64)[:3, :3]
+                prior_kml = (p_init.copy(), self._whitening(Sigma_pp))
+            elif corr in (PixelType.S_S, PixelType.S_M):
+                # Triangulate at k-1 → prior at k-1, also serves as p_init
+                tri = self._triangulate_stereo(p, frame="prev")
+                if tri is None:
+                    continue
+                p_init, Sigma_p = tri
+                prior_kml = (p_init.copy(), self._whitening(Sigma_p))
+            elif corr == PixelType.M_S:
+                # Triangulate at k → prior at k; p_init from CandidateSample
+                tri = self._triangulate_stereo(p, frame="curr")
+                if tri is not None:
+                    p_Bk_hat, Sigma_p_Bk = tri
+                    prior_k = (p_Bk_hat, self._whitening(Sigma_p_Bk))
+                if cand.p_Bk is not None and cand.p_Bkm1 is None:
+                    cand.p_Bkm1 = T_k_to_km1.apply(jnp.asarray(cand.p_Bk))
+                p_init = np.asarray(cand.p_Bkm1, dtype=np.float64).reshape(3)
+            else:
+                # MM with no previous-solve prior
+                if cand.p_Bk is not None and cand.p_Bkm1 is None:
+                    cand.p_Bkm1 = T_k_to_km1.apply(jnp.asarray(cand.p_Bk))
+                p_init = np.asarray(cand.p_Bkm1, dtype=np.float64).reshape(3)
+
+            # ---- MM observability gate ----
             if corr == PixelType.M_M:
-                # v_⊥ = sign-preserving projection of v_p onto d_⊥
+                t_base = self._t_base(delta_T_prior, cam_m)
+                if float(np.linalg.norm(t_base)) < self.t_base_min:
+                    log.debug(f"MM point {p.id} skipped: ‖t_base‖ < {self.t_base_min}")
+                    continue
+            
+            # ---- Build s_i ----
+            if corr == PixelType.M_M:
                 d_perp = np.asarray(self.d_perp(p_init, delta_T_prior, cam_m))
                 v_perp = float(np.asarray(cand.v_p, dtype=np.float64).reshape(-1) @ d_perp)
                 s_i = np.concatenate([p_init, [v_perp]])
@@ -162,12 +212,18 @@ class Solver:
                 v_init = np.asarray(cand.v_p, dtype=np.float64).reshape(3)
                 s_i = np.concatenate([p_init, v_init])
 
-            s_blocks.append(s_i)
-            point_ids.append(p.id)
-            corr_types.append(corr)
-            offsets.append(offset)
-            offset += s_i.shape[0]
-            self._z[p.id] = jnp.asarray(z_i)
+        s_blocks.append(s_i)
+        point_ids.append(p.id)
+        corr_types.append(corr)
+        offsets.append(offset)
+        offset += s_i.shape[0]
+        self._z[p.id] = jnp.asarray(z_i)
+
+        # Stash priors (only after the point is committed)
+        if prior_kml is not None:
+            self._priors_kml[p.id] = prior_kml
+        if prior_k is not None:
+            self._priors_k[p.id] = prior_k
 
         s_flat = jnp.asarray(np.concatenate(s_blocks)) if s_blocks else jnp.zeros(0)
         self._x = JointState(
@@ -182,7 +238,9 @@ class Solver:
         """Σ^{-1/2} via Cholesky: Σ = L Lᵀ ⇒ Σ^{-1/2} ≡ L^{-1}
         satisfies (Σ^{-1/2})ᵀ Σ^{-1/2} = Σ^{-1}."""
         L = np.linalg.cholesky(Sigma)
-        return np.linalg.inv(L)
+        L_inv = np.linalg.inv(L)
+        log.debug(f"Whitening: {L_inv}")
+        return L_inv
 
     def _stack_measurement(self, p: Point, corr: PixelType) -> np.ndarray | None:
         """Stack pixel measurements per correspondence type. Order matches h_point."""
@@ -330,13 +388,10 @@ class Solver:
     def d_perp(self, p_Bkm1: np.ndarray, delta_T: jaxlie.SE3,
                camera: str) -> np.ndarray:
         """d_⊥ in B_{k-1} (§eq:d_perp). Recomputed each iteration."""
-        T = np.asarray(delta_T.as_matrix(), dtype=np.float64)
-        dR, dt_vec = T[:3, :3], T[:3, 3]
         R_cB, R_Bc, t_c = self.R_cB[camera], self.R_Bc[camera], self.t_c[camera]
 
         # §eq:t_base
-        t_base = t_c - R_cB @ dR.T @ (R_Bc @ t_c + dt_vec)
-
+        t_base = self._t_base(delta_T, camera)
         # Ray in camera frame
         p_c = R_cB @ p_Bkm1 + t_c
         ray = np.array([p_c[0] / p_c[2], p_c[1] / p_c[2], 1.0])
@@ -349,6 +404,56 @@ class Solver:
             # Fall back to body-z; downstream gates should catch this.
             return np.array([0.0, 0.0, 1.0])
         return d_B / norm
+
+    def _t_base(self, delta_T: jaxlie.SE3, camera: str) -> np.ndarray:
+        """Camera-frame baseline t_{c_{k-1},c_k} (§eq:t_base)."""
+        T = np.asarray(delta_T.as_matrix(), dtype=np.float64)
+        dR, dt_vec = T[:3, :3], T[:3, 3]
+        R_cB, R_Bc, t_c = self.R_cB[camera], self.R_Bc[camera], self.t_c[camera]
+        return t_c - R_cB @ dR.T @ (R_Bc @ t_c + dt_vec)
+
+
+    def _triangulate_stereo(self, p: Point, frame: str
+                            ) -> tuple[np.ndarray, np.ndarray] | None:
+        """Triangulate stereo pair at 'prev' or 'curr' frame
+        (§sec:depth_estimation). Returns (p_hat, Σ_p) in body frame, None on
+        invalid pair.
+        """
+        if frame == "prev":
+            uL, uR = p.uL_prev, p.uR_prev
+        else:
+            uL, uR = p.uL_curr, p.uR_curr
+        if uL is None or uR is None:
+            return None
+
+        K = self.K["L"]
+        fu, fv = K[0, 0], K[1, 1]
+        cu, cv_c = K[0, 2], K[1, 2]
+        baseline = float(self.calib["camera_extrinsics"]["baseline"])
+        R_BL = self.R_Bc["L"]; t_L = self.t_c["L"]
+        var_px = float(self.alg["cv"]["var_sigma_px"])
+        
+        uLx, uLy = uL.pt
+        uRx      = uR.pt[0]
+        disparity = uLx - uRx
+
+        if np.isclose([disparity], [0])[0]:
+            return None
+
+        inv_fu, inv_fv, inv_d = 1.0 / fu, 1.0 / fv, 1.0 / disparity
+        x_n = (uLx - cu) * inv_fu
+        y_n = (uLy - cv_c) * inv_fv
+        Z   = baseline * fu / disparity
+        p_c = np.array([x_n * Z, y_n * Z, Z])
+
+        J = Z * np.array([
+            [inv_fu - x_n * inv_d, 0.0,    x_n * inv_d],
+            [-y_n * inv_d,         inv_fv, y_n * inv_d],
+            [-inv_d,               0.0,    inv_d],
+        ])
+        Sigma_pB = R_BL @ (var_px * (J @ J.T)) @ R_BL.T
+        p_B      = R_BL @ (p_c - t_L)
+        return p_B, Sigma_pB
 
     # ---- normal equations ------------------------------------------------
 
@@ -381,8 +486,22 @@ class Solver:
             # Scalar whitening
             A_rows.append(self.inv_sigma * A_i)
             b_rows.append(self.inv_sigma * b_i)
+            
+            # Point priors
+            if pid in self._priors_kml:
+                mean, L_inv = self._priors_kml[pid]
+                A_p, b_p = self.point_prior_kml_block(x, i, mean, L_inv)
+                A_rows.append(A_p); b_rows.append(b_p)
+            if pid in self._priors_k:
+                mean, L_inv = self._priors_k[pid]
+                A_q, b_q = self.point_prior_k_block(x, i, mean, L_inv)
+                A_rows.append(A_q); b_rows.append(b_q)
 
-        return np.vstack(A_rows), np.concatenate(b_rows)
+
+        A_stacked = np.vstack(A_rows)
+        b_stacked = np.concatenate(b_rows)
+        log.debug(f"The stacked As: {A_stacked} \nThe stacked bs: {b_stacked}")
+        return A_stacked, b_stacked 
 
     def prior_block(self, delta_T: jaxlie.SE3,
                     delta_T_prior: jaxlie.SE3,
@@ -399,6 +518,45 @@ class Solver:
         A0[:, :6] = L_prior
         return A0, b0
 
+    def point_prior_kml_block(self, x: JointState, idx: int,
+                            mean: np.ndarray, L_inv: np.ndarray
+                            ) -> tuple[np.ndarray, np.ndarray]:
+        """Whitened k-1 point prior on p_i (§eq:prior_kml). Linear in state."""
+        D   = x.dim()
+        off = 6 + x.offsets[idx]
+        s_i = np.asarray(x.s_block(idx), dtype=np.float64)
+        A = np.zeros((3, D))
+        A[:, off:off + 3] = L_inv
+        b = L_inv @ (mean - s_i[:3])
+        return A, b
+
+    def point_prior_k_block(self, x: JointState, idx: int,
+                            mean: np.ndarray, L_inv: np.ndarray
+                            ) -> tuple[np.ndarray, np.ndarray]:
+        """Whitened k point prior on q = ΔT·(p + v·dt) (§eq:prior_k).
+
+        Linearised each iteration: Jacobian blocks for pose, p, v match
+        the measurement Jacobian's k-frame structure.
+        """
+        D   = x.dim()
+        off = 6 + x.offsets[idx]
+        dt  = self._dt
+        s_i = np.asarray(x.s_block(idx), dtype=np.float64)
+        p_t, v_t = s_i[:3], s_i[3:6]
+
+        T  = np.asarray(x.delta_T.as_matrix(), dtype=np.float64)
+        dR = T[:3, :3]
+        p_pre = p_t + v_t * dt
+        q_t   = dR @ p_pre + T[:3, 3]
+
+        J_pose = np.hstack([dR, -dR @ np_skew(p_pre)])    # (3, 6)
+        A = np.zeros((3, D))
+        A[:, :6]              = L_inv @ J_pose
+        A[:, off:off + 3]     = L_inv @ dR
+        A[:, off + 3:off + 6] = L_inv @ dR * dt
+        b = L_inv @ (mean - q_t)
+        return A, b
+
     # ---- iteration -------------------------------------------------------
 
     def step(self, x: JointState) -> np.ndarray:
@@ -413,21 +571,27 @@ class Solver:
         return JointState(delta_T=new_T, s=new_s,
                           point_ids=x.point_ids, corr_types=x.corr_types,
                           offsets=x.offsets)
-
-    def run(self) -> tuple[JointState, jnp.ndarray]:
+    def run(self):
         """Iterate GN to convergence. Returns (x_post, Σ_post_full in B_{k-1})."""
         assert self._x is not None, "Solver not initialised."
         x = self._x
-        for _ in range(self.max_iters):
-            tau = self.step(x)
-            x = self.apply_increment(x, tau)
-            if float(np.linalg.norm(np.asarray(tau))) < self.eps_tau:
-                break
+        
+        prev_res = float("inf")
 
+        for _ in range(self.max_iters):
+            A, b = self.build_normal_equations(x)
+            res = float(np.linalg.norm(b))
+            if prev_res - res < self.eps_residual:   # negligible progress
+                break
+            prev_res = res
+            tau = np.linalg.solve(A.T @ A, A.T @ b)
+            if float(np.linalg.norm(tau)) < self.eps_tau:
+                x = self.apply_increment(x, tau)
+                break
+            x = self.apply_increment(x, tau)
+        # final Σ
         A, _ = self.build_normal_equations(x)
-        Sigma_full = np.linalg.inv(A.T @ A)
-        self._x = x
-        return x, jnp.asarray(Sigma_full)
+        return x, jnp.asarray(np.linalg.inv(A.T @ A))
 
     # ---- output transport: B_{k-1} → B_k ---------------------------------
 
@@ -506,9 +670,13 @@ class Solver:
             p    = point_map[pid]
 
             p.p_curr     = s_i[:3]
-            p.Sigma_curr = np.asarray(point_sigmas[pid], dtype=np.float64)
+            sigma = np.asarray(point_sigmas[pid], dtype=np.float64)
+            p.Sigma_curr = 0.5 * (sigma + sigma.T)
 
             if corr == PixelType.M_M:
                 p.v_curr = float(s_i[3]) * mm_d_perp_Bk[pid]
             else:
                 p.v_curr = s_i[3:6]
+
+            if np.any(np.isnan(p.p_curr)) or np.any(np.isnan(p.Sigma_curr)) or np.any(np.isnan(p.v_curr)):
+                log.debug(f"Point: {p} has nan in one of p_Bk={p.p_curr}, v_p={p.v_curr} or Sigma={p.Sigma_curr}")
