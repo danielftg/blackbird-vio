@@ -75,7 +75,8 @@ cv:                                    # computer vision parameters
                                        # assumed for inter-frame prediction
                                 
 solver:                                # stage-2 nonlinear solver (Gauss-Newton)
-  max_iters:      10                   # max GN iterations per frame
+  eps_tau:        1e-6                 # GN convergence threshold on ‖τ‖
+  max_iters:      20                   # GN iteration cap
   rel_tol:        1.0e-5               # relative cost decrease termination
   abs_tol:        1.0e-7               # absolute cost termination
   huber_delta:    1.5                  # Huber robust kernel threshold [px]

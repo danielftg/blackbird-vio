@@ -5,6 +5,7 @@ from pathlib import Path
 from cv2.typing import MatLike
 import cv2 as cv
 import jax.numpy as jnp
+import numpy as np
 import yaml
 
 
@@ -31,3 +32,10 @@ def skew(v: jnp.ndarray) -> jnp.ndarray:
         [ v[2],    0.0, -v[0]],
         [-v[1],  v[0],    0.0],
     ])
+
+
+def np_skew(v: np.ndarray) -> np.ndarray:
+    """3-vector to 3x3 skew."""
+    return np.array([[ 0.0,  -v[2],  v[1]],
+                     [ v[2],   0.0, -v[0]],
+                     [-v[1],  v[0],  0.0]])

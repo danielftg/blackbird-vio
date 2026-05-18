@@ -285,8 +285,8 @@ class Algo:
         # Stage-2 points in F_pre ∪ I: classify CorrType, solve with the
         # post-update pose prior, transport per-point states/covariances
         # to B_k, write back to Point objects.
-        sol, sol_covar = self._solve_joint(
-            delta_T, covar_delta_T, w_cands
+        sol_dT, covar_dT = self._solve_joint(
+            delta_t, delta_T, covar_delta_T, w_cands
         )
         
 
@@ -305,7 +305,7 @@ class Algo:
         # Assemble C_k from the three sources (F via EKF, F_pre/I via
         # solver, stage-1 stereo via disparity).
         # Roll accumulator k → k-1.
-        out = self._emit_and_roll(sol.delta_T, sol_covar[:6, :6])
+        out = self._emit_and_roll(sol_dT, covar_dT)
         
         
         # ---- Housekeeping  ------------------------------------------------
@@ -429,20 +429,21 @@ class Algo:
         return upd_state_matrix
 
 
-    def _solve_joint(self, delta_T_prior: jaxlie.SE3,
+    def _solve_joint(self, dt:float,
+                     delta_T_prior: jaxlie.SE3,
                      Sigma_prior: jnp.ndarray,
                      init_samples: dict[int, CandidateSample]
-                     ) -> tuple[JointState, jnp.ndarray]:
+                     ) -> tuple[jaxlie.SE3, jnp.ndarray]:
         """Run the joint Gauss-Newton solver, transport to B_k, write
-        back to Points. Returns (x_post in B_k, Σ_post in B_k)."""
+        back to Points. Returns (x_post.delta_T in B_k, Σ_post in B_k of delta_T)."""
         all_pts = self.accum.I.union(self.accum.F_pre)
         solvr = self.solvr
 
-        solvr.initialise(all_pts, delta_T_prior, Sigma_prior, init_samples)
+        solvr.initialise(dt, all_pts, delta_T_prior, Sigma_prior, init_samples)
         sol, sol_covar = solvr.run()     
         sol, sol_covar = solvr.transport_to_Bk(sol, sol_covar)
         solvr.write_back(sol, sol_covar, all_pts)
-        return sol, sol_covar 
+        return sol.delta_T, sol_covar["pose"]
 
     def _admit_features(self) -> None:
         """Velocity gate on F_pre points with first solve. Move passes
