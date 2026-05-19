@@ -3,79 +3,76 @@
 # No values dependent on physical reality. Those go into calibration.
 # =============================================================================
 
-# Default focus point and region.
 focus:
-  point: [5.0, 0.0, 0.0]
-  sigma: 80.0
+  point: [5.0, 0.0, 0.0]               # F_{-1} ∈ ℝ³, [m], body-frame focus
+  sigma: 80.0                           # σ_F ∈ ℝ_{>0}, [px], Gaussian spread
 
 
-signif:                                # significance levels (∈ (0, 1))
-  alpha_NIS:  0.99                     # NIS gate (§4.2). χ² test on Mahalanobis
-                                       # distance of measurement residuals.
-                                       # 0.99 = reject 1% of inliers.
-  alpha_adm:  0.95                     # Admission test (§4.3). Test for adding
-                                       # new features to the EKF state. More
-                                       # permissive than the NIS gate.
-  alpha_sr:   0.997                    # Search region (§3.8.3). 3σ bound on
-                                       # predicted feature location.
+signif:                                # α ∈ (0, 1), confidence levels
+  alpha_NIS:  0.99                     # NIS gate (§4.2). χ² on residual
+                                       # Mahalanobis distance. 0.99 = reject
+                                       # 1% of inliers.
+  alpha_adm:  0.95                     # Admission test (§4.3).
+                                       # More permissive than NIS gate.
+  alpha_sr:   0.997                    # Search region (§3.8.3). 3σ bound.
 
 cv:                                    # computer vision parameters
-  # ---- feature counts ---------------------------------------------------
-  N_F_max:         50                   # max features tracked simultaneously
-  N_I_max:         200                  # max interest points evaluated per
-                                        # frame (before allocation/pruning)
-  N_feat_gl:       80                   # global feature target across image
-  N_feat_lo:       6                    # local feature target per grid cell
-  min_distance_px: 1                    # minmum distance between keypoints
-  
+  # ---- feature counts (∈ ℕ) ---------------------------------------------
+  N_F_max:         50                  # max EKF features tracked
+  N_I_max:         200                 # max interest points evaluated per
+                                       # frame (before allocation/pruning)
+  N_feat_gl:       80                  # global feature target across image
+  N_feat_lo:       6                   # local feature target per grid cell
+  min_distance_px: 1                   # [px] min distance between keypoints
+
   # ---- detection --------------------------------------------------------
-  tau_min:        1.0e-3               # min Shi-Tomasi cornerness (relative;
-                                       # absolute threshold = tau_min · max
-                                       # eigenvalue in image)
-  fast_threshold: 10 
-  fast_non_max:   True
+  tau_min:        1.0e-3               # τ_min ∈ ℝ_{>0}, [-]
+                                       # min Shi-Tomasi cornerness (relative
+                                       # to max eigenvalue in image)
+  fast_threshold: 10                   # ∈ ℕ
+  fast_non_max:   True                 # ∈ Bool
 
-  sht_block_size: 3
-  sht_ksize:      3
+  sht_block_size: 3                    # ∈ ℕ, odd
+  sht_ksize:      3                    # ∈ ℕ, odd
 
-  grid_cells:     [8, 6]               # detection grid [W, H] cells; for
-                                       # spatially-distributed feature
-                                       # selection on 640x480 → 80x80 px cells
+  grid_cells:     [8, 6]               # (cols, rows) ∈ ℕ², detection grid
+                                       # 640×480 → 80×80 px cells
 
   # ---- tracking ---------------------------------------------------------
-  fb_check:       1.5                  # ε_fb forward-backward check threshold
-                                       # [px]. Reject KLT tracks whose
-                                       # round-trip pixel error exceeds this.
-  klt_window:     21                   # KLT integration window size [px]
-  klt_pyramid:    3                    # KLT pyramid levels
-  klt_max_iter:   30                   # LK termination max iterations
-  klt_eps:        0.01                 # LK termination epsilon
- 
-  n_max:          200                  # max point lifetime [frames]
-                                       # (~3.3 s at 60 Hz)
-  ssd_patch_size: [11,11]              # Size of matching patch [width, height]
-  # ---- stereo matching --------------------------------------------------
-  ncc_min:        0.8                  # Minimum NCC value for stereo matching
-  ncc_patch_size: 15                   # Size of square matching patch
-  disp_min:       1                    # min disparity [px]. Avoid div-by-zero
-                                       # at infinity; enforces Z_max constraint
-  disp_max:       128                  # max disparity [px]. Enforces Z_min
-                                       # constraint at b·fx/disp_max
-  stereo_subpix:  true                 # parabolic sub-pixel disparity refinement
-  var_sigma_px:   1.0                  # [px] variance of stereo pixel noise
+  fb_check:       1.5                  # ε_fb ∈ ℝ_{>0}, [px]
+                                       # forward-backward check threshold
+  klt_window:     21                   # ∈ ℕ, [px], odd
+  klt_pyramid:    3                    # ∈ ℕ, pyramid levels
+  klt_max_iter:   30                   # ∈ ℕ, LK termination max iterations
+  klt_eps:        0.01                 # ∈ ℝ_{>0}, [px], LK termination eps
 
-  # ---- search region (§3.8.3) ------------------------------------------
-  Z_min:          0.3                  # [m] min predicted depth (RealSense
-                                       # short-range floor)
-  Z_max:          50.0                 # [m] max predicted depth (indoor scene
-                                       # bound; refine for outdoor sequences)
-  v_max:          10.0                 # [m/s] max body-frame velocity assumed
-                                       # for inter-frame prediction
-  a_max:          20.0                 # [m/s²] max body-frame acceleration
-                                       # assumed for inter-frame prediction
-                                
-solver:                                # stage-2 nonlinear solver (Gauss-Newton)
-  t_base_min:     1.0e-3               # m, minimum baseline for MM admission
-  eps_tau:        1e-6                 # GN convergence threshold on ‖τ‖
-  eps_residual:   1e-9                 # ‖b‖ progress floor per iteration
-  max_iters:      20                   # GN iteration cap
+  n_max:          200                  # ∈ ℕ, [frames], max point lifetime
+                                       # (per-instance jittered, see points.py)
+
+  ssd_patch_size: [11, 11]             # (w, h) ∈ ℕ², [px], odd
+
+  # ---- stereo matching --------------------------------------------------
+  ncc_min:        0.8                  # ∈ [-1, 1], min NCC for stereo match
+  ncc_patch_size: 15                   # ∈ ℕ, [px], odd, square patch
+  disp_min:       1                    # ∈ ℝ_{>0}, [px], avoids div-by-zero
+                                       # at infinity; enforces Z_max bound
+  disp_max:       128                  # ∈ ℝ_{>0}, [px], enforces Z_min bound
+                                       # via Z_min = b·fx / disp_max
+  stereo_subpix:  true                 # ∈ Bool, parabolic sub-pixel refinement
+  var_sigma_px:   1.0                  # σ_px² ∈ ℝ_{>0}, [px²]
+                                       # stereo pixel measurement variance
+
+  # ---- search region (§3.8.3) -------------------------------------------
+  Z_min:          0.3                  # ∈ ℝ_{>0}, [m], min predicted depth
+                                       # (RealSense short-range floor)
+  Z_max:          50.0                 # ∈ ℝ_{>0}, [m], max predicted depth
+                                       # (indoor scene bound)
+  v_max:          10.0                 # ∈ ℝ_{>0}, [m/s], assumed max body vel
+  a_max:          20.0                 # ∈ ℝ_{>0}, [m/s²], assumed max accel
+
+solver:                                # stage-2 GN solver (§sec:joint_solver)
+  t_base_min:     1.0e-3               # ∈ ℝ_{>0}, [m]
+                                       # min baseline ‖t_base‖ for MM admission
+  eps_tau:        1e-6                 # ∈ ℝ_{>0}, GN convergence on ‖τ‖
+  eps_residual:   1e-9                 # ∈ ℝ_{>0}, ‖b‖ progress floor per iter
+  max_iters:      20                   # ∈ ℕ, GN iteration cap
