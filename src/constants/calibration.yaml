@@ -1,0 +1,238 @@
+# =============================================================================
+# Calibration for ZJU-FAST-Lab VID-Dataset
+# Sources:   [P]   Zhang et al., arXiv 2103.11152 (the paper)
+#            [VD]  github.com/ZJU-FAST-Lab/VID-Dataset
+#            [VFP] github.com/ZJU-FAST-Lab/VID-Flight-Platform
+#            [VF]  github.com/ZJU-FAST-Lab/VID-Fusion (config files)
+#            [EST] educated estimate, not reported in any source — see notes
+#
+# Each parameter is annotated with its mathematical type alongside its
+# physical units. Frames: B (FRD body, CoG-centred), C^L/C^R (camera, 
+# RealSense convention), M (Vicon marker). Notation: CoG ≈ CoM 
+# (CoM not reported).
+# =============================================================================
+
+vicon_params:
+  # T_MB ∈ SE(3): pose from body to marker. Not reported in [P] or [VD].
+  body_to_marker:
+    rotation:                          # R_MB ∈ SO(3), FRD → FLU
+      - [1.0,  0.0,  0.0]              # rotates B-frame vectors into M
+      - [0.0, -1.0,  0.0]              # x→x, y→-y, z→-z
+      - [0.0,  0.0, -1.0]
+    translation: [0.0, 0.0, 0.0]       # t_MB ∈ ℝ³, [m], body origin in M
+
+drone_parameters:                      # X-config quadcopter
+  drag_coeff: 1.2                      # C_d ∈ ℝ_{≥0}, [N·s/m]              [EST]
+  arm_length: 0.325                    # l ∈ ℝ_{>0}, [m], CoG → rotor
+                                       # = wheelbase/2; [P Tab II] "650mm"
+  mass: 3.0961                         # m ∈ ℝ_{>0}, [kg]
+                                       # [VD rosbag directory name]
+  inertia_tensor:                      # diag(J_xx, J_yy, J_zz) ∈ ℝ³, [kg·m²]
+    - 0.083                            # J_xx                                [EST]
+    - 0.083                            # J_yy                                [EST]
+    - 0.163                            # J_zz                                [EST]
+                                       # Replace with measured values when
+                                       # available (bifilar pendulum, or
+                                       # Burri-2016 MLE identification).
+
+  # Rotor numbering (ours):     1=FR-CW  2=RR-CCW  3=RL-CW  4=FL-CCW
+  # Rotor numbering (paper):    1=FR     2=FL      3=RL     4=RR [P Tab III caption]
+  # Therefore (our idx → paper idx): 1→1, 2→4, 3→3, 4→2
+  # Sign convention: |k_m| used here; sign comes from mixing matrix.
+  # Spin pairing in [P]: rotors {1,3} share one direction, {2,4} the other.
+
+  rotor_1:                             # FR (CW) — paper rotor 1
+    rpm_thr_coeff: 2.6890e-7           # k_t ∈ ℝ_{>0}, [N/rpm²], T = k_t·n²
+    ang_thr_coeff: 2.452e-5            # k_f ∈ ℝ_{>0}, [N·s²/rad²], T = k_f·ω_r²
+    rpm_tor_coeff: 5.6343e-9           # |k_m| ∈ ℝ_{>0}, [N·m/rpm²]
+    ang_tor_coeff: 5.137e-7            # |k_m| ∈ ℝ_{>0}, [N·m·s²/rad²]
+  rotor_2:                             # RR (CCW) — paper rotor 4
+    rpm_thr_coeff: 2.7741e-7
+    ang_thr_coeff: 2.530e-5
+    rpm_tor_coeff: 4.8260e-9
+    ang_tor_coeff: 4.401e-7
+  rotor_3:                             # RL (CW) — paper rotor 3
+    rpm_thr_coeff: 2.7263e-7
+    ang_thr_coeff: 2.486e-5
+    rpm_tor_coeff: 5.7012e-9
+    ang_tor_coeff: 5.198e-7
+  rotor_4:                             # FL (CCW) — paper rotor 2
+    rpm_thr_coeff: 2.8190e-7
+    ang_thr_coeff: 2.571e-5
+    rpm_tor_coeff: 4.7180e-9
+    ang_tor_coeff: 4.302e-7
+                                       # [P Tab III]
+                                       # Conversion: ang = rpm·900/π² ≈ 91.189
+
+sensor_parameters:                     # all from [P Tab II]
+  noise_tacho:    1.459                # σ_n ∈ ℝ_{>0}, [rpm/√Hz]
+  noise_gyro:     0.001                # σ_ω ∈ ℝ_{>0}, [rad/s/√Hz]
+  bias_rw_gyro:   3.500e-5             # σ_bω ∈ ℝ_{>0}, [rad/s²/√Hz]
+  noise_acc:      0.100                # σ_a ∈ ℝ_{>0}, [m/s²/√Hz]
+  bias_rw_acc:    4.000e-3             # σ_ba ∈ ℝ_{>0}, [m/s³/√Hz]
+  noise_force:                         # σ_F ∈ ℝ³, [N], static-test noise
+    - 0.1
+    - 0.1
+    - 0.1
+  noise_torque:                        # σ_τ ∈ ℝ³, [N·m], static-test noise
+    - 5.0e-3
+    - 5.0e-3
+    - 3.0e-3
+
+
+# =============================================================================
+# Camera intrinsics: PINHOLE Model
+# =============================================================================
+# Topics in the bag are /camera/infra1/image_rect_raw and
+# /camera/infra2/image_rect_raw — these are stereo-rectified IR images, so
+# distortion is zero by construction.
+#
+# Values below are from VID-Fusion's real_drone.yaml [VF], calibrated for the
+# same camera model (D435i) but a different physical unit. Per-unit factory
+# variation is ~1%. Best available.
+# =============================================================================
+
+camera_intrinsics:
+
+  left: &C
+    size:                              # (w, h) ∈ ℕ², [px], [P Tab II]
+      - 640                            # w
+      - 480                            # h
+    dist_coeff:                        # D^L ∈ ℝ⁴, rectified IR → zero
+      - 0.0                            # k_1
+      - 0.0                            # k_2
+      - 0.0                            # p_1
+      - 0.0                            # p_2
+    k_matrix:                          # K^L ∈ ℝ³ˣ³, [VF]
+      - [384.18206787109375,   0.0,             320.95831298828125]
+      - [  0.0,              384.18206787109375, 237.53884887695312]
+      - [  0.0,                0.0,                1.0]
+
+  right: *C                         
+
+# =============================================================================
+# Camera extrinsics — pose from body frame B to camera frame
+# =============================================================================
+# Body frame B: FRD (x fwd, y right, z down), origin at CoM ≈ CoG.
+# Camera frame C: RealSense convention (x right, y down, z fwd).
+# IMU frame I, CoG frame G: both FLU (x fwd, y left, z up) [P Fig 2].
+#
+# Translation chain, in body FRD [m]:
+#   CoG → camera front panel center (= Intel D435 CAD origin):
+#     t = (0.1887, 0, -0.020505)        [VFP] STP measurement
+#
+#   Camera front panel center → left IR optical center:
+#     t_l = (-0.0043, -0.0175, 0)
+#       x: 4.3 mm behind front face (left-IR optical center).
+#          front-glass-to-imager 4.2 mm + [LRS issue 999] glass
+#          0.1 mm proud of body face
+#       y: -17.5 mm (left of front-panel center). CAD measurement.
+#       z: 0.
+#
+#   Camera front panel center → right IR optical center:
+#     t_r = (-0.0043, 0.0325, 0)
+#
+# Combine:
+#   t_L^B = t + t_l = (0.1844, -0.0175, -0.020505) m
+#   t_R^B = t + t_r = (0.1844,  0.0325, -0.020505) m
+#   |t_R^B - t_L^B|_y = 0.050 m = stereo baseline   ✓
+#
+# Rotation R_BC (nominal forward mount, no roll about optical axis):
+#   cam x (right) = body y → col 1 = (0, 1, 0)
+#   cam y (down)  = body z → col 2 = (0, 0, 1)
+#   cam z (fwd)   = body x → col 3 = (1, 0, 0)
+#   R_BC  = [[0,0,1],[1,0,0],[0,1,0]]
+#   R_LB  = R_RB = R_BC^T = [[0,1,0],[0,0,1],[1,0,0]]
+#
+# SE(3) "pose from B to L", applied as p^L = T_LB · p^B:
+#   T_LB translation = -R_LB · t_L^B = ( 0.0175, 0.020505, -0.1844) m
+#   T_RB translation = -R_RB · t_R^B = (-0.0325, 0.020505, -0.1844) m
+#
+# CAVEAT: rotation R_BC is the nominal mount (no Kalibr-calibrated value
+# published by [P]). Few-degree mounting misalignment is unmodelled.
+# =============================================================================
+
+camera_extrinsics:
+  baseline: 0.05                       # b ∈ ℝ_{>0}, [m], [P Tab II]
+  left:
+    cog_cam:                           # T_LB ∈ SE(3): pose from B to L
+      - [0.0, 1.0, 0.0,   0.0175]      # row 1: R_LB | t_LB
+      - [0.0, 0.0, 1.0,   0.020505]    # row 2
+      - [1.0, 0.0, 0.0,  -0.1844]      # row 3
+      - [0.0, 0.0, 0.0,   1.0]         # row 4: [0 0 0 | 1]
+  right:
+    cog_cam:                           # T_RB ∈ SE(3): pose from B to R
+      - [0.0, 1.0, 0.0,  -0.0325]
+      - [0.0, 0.0, 1.0,   0.020505]
+      - [1.0, 0.0, 0.0,  -0.1844]
+      - [0.0, 0.0, 0.0,   1.0]
+
+
+# =============================================================================
+# =============================================================================
+# EKF system model and measurement model
+# =============================================================================
+# =============================================================================
+
+# =============================================================================
+# EKF system model — Initial state and noise parameters
+# =============================================================================
+ekf_sys:
+  aug_cross_seed: 1e-6                 # ε ∈ ℝ_{>0}, [-], cross-cov seed at augment
+
+  # Initial state x_0. Drone starts at rest, on the ground, level.
+  # Pose is identity by construction (S_0 = I, body frame coincides with B_0).
+  init_state:
+    pose:    [0.0, 0.0, 0.0,  0.0, 0.0, 0.0]   # ξ ∈ ℝ⁶, se(3) tangent: ρ; φ
+    lin_vel: [0.0, 0.0, 0.0]                   # v ∈ ℝ³, [m/s] in B
+    ang_vel: [0.0, 0.0, 0.0]                   # ω ∈ ℝ³, [rad/s] in B
+    grav:    [0.0, 0.0, 9.7935]                # g ∈ ℝ³, [m/s²], FRD: +z
+    dist:    [0.0, 0.0, -9.7935]               # d ∈ ℝ³, [m/s²], zero-mean
+                                               # disturbance or normal force
+
+  # Initial covariance P_0. Diagonal, in same units as state².
+  # Pose, lin_vel, ang_vel are tightly known at start (drone on ground).
+  # Gravity magnitude known to fractions of a percent, direction
+  # uncertain by mounting alignment (~1°).
+  # Disturbance has the largest a-priori uncertainty.
+  init_covar:                          # diag(P_0) ∈ ℝ^{18}_{>0}
+    var_pose:    [1.0e-6, 1.0e-6, 1.0e-6,  1.0e-6, 1.0e-6, 1.0e-6]
+                                       # σ_ξ², [m²; rad²]  ~1 mm, ~0.06°
+    var_lin_vel: [1.0e-4, 1.0e-4, 1.0e-4]
+                                       # σ_v², [(m/s)²]     1 cm/s
+    var_ang_vel: [1.0e-4, 1.0e-4, 1.0e-4]
+                                       # σ_ω², [(rad/s)²]   ~0.6°/s
+    var_grav:    [3.0e-3, 3.0e-3, 3.0e-3]
+                                       # σ_g², [(m/s²)²]    ~1° tilt at g
+    var_dist:    [1.0,    1.0,    1.0]
+                                       # σ_d², [(m/s²)²]    ~1 m/s²
+
+  # Process noise Q. Per-step variances on each driving noise channel.
+  # Tune from EKF residuals on indoor_loadless_hovor.
+  covar:                               # diag(Q) ∈ ℝ^{13}_{>0}
+    var_act:     [0.04, 0.04, 0.04, 0.04]
+                                       # Q_u ∈ ℝ⁴, [N²]
+                                       # per-rotor thrust w_u (tacho prop.)
+    var_ang_vel: [1.0e-4, 1.0e-4, 1.0e-4]
+                                       # Q_ω ∈ ℝ³, [(rad/s²)²/Hz]
+                                       # unmodelled aero torque
+    var_grav:    [1.0e-6, 1.0e-6, 1.0e-6]
+                                       # Q_g ∈ ℝ³, [(m/s²)²/Hz]
+                                       # small drift on g (mostly numerical)
+    var_dist:    [1.0e-2, 1.0e-2, 1.0e-2]
+                                       # Q_d ∈ ℝ³, [(m/s²)²/Hz]
+                                       # random-walk on disturbance state
+
+
+# =============================================================================
+# EKF measurement model — Noise parameters
+# =============================================================================
+ekf_meas:
+  g_norm: 9.7935                       # g ∈ ℝ_{>0}, [m/s²], Hangzhou local
+
+  covar:
+    var_px:  1.0                       # σ_px² ∈ ℝ_{>0}, [px²]
+                                       # stereo reprojection per coord
+                                       # (~1 px std typical)
+    var_g:   9.0e-4                    # R_g ∈ ℝ_{>0}, [(m/s²)²]
+                                       # ‖g‖ pseudo-measurement (0.03 m/s²)
