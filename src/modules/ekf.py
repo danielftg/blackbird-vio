@@ -24,11 +24,12 @@ import jaxlie
 
 
 from .points import Point, PointSet
-from .utils import skew
+from .utils import skew, make_psd
 
 # =============================================================================
 # Shared functions
 # =============================================================================
+
 def project_point(p_B: jnp.ndarray, calib: dict, camera: str) -> jnp.ndarray:
     """Project a body-frame point into camera  ∈ {"L", "R"}.
 
@@ -90,53 +91,66 @@ def relative_pose(T_a: jaxlie.SE3, T_b: jaxlie.SE3,
                   covar_a: jnp.ndarray, covar_b: jnp.ndarray,
                   state_matrix: jnp.ndarray,
                   update_matrix: jnp.ndarray = None,
-                  a_ids: list = None, b_ids: list = None,
+                  a_ids: list = None,
+                  c_ids: list = None,
+                  b_ids: list = None,
                   ) -> tuple[jaxlie.SE3, jnp.ndarray]:
     """Relative pose Δ = T_b T_a⁻¹ and 6x6 covariance.
- 
+
     Args
     ----
-    T_a, T_b        : SE(3) endpoints (T̂_{k-1}^+ and T̂_k^- or T̂_k^+).
-    covar_a         : full covariance at k-1, shape (n_a, n_a).
-    covar_b         : full covariance at k,   shape (n_b, n_b).
-    state_matrix    : Φ_{k-1} = I + dt·F, shape (n_a, n_a).
-    update_matrix   : (I - K_k H_k), shape (n_b, n_b). Pass None for
-                      pre-update.
-    a_ids, b_ids    : feature-id ordering at k-1 and at k. Required for
-                      post-update; used to map surviving rows of Φ P^{k-1,+}
-                      to the (possibly smaller) post-marginalisation dim.
- 
-    Returns
-    -------
-    (ΔT, Σ_Δξ).
+    T_a, T_b      : SE(3) endpoints.
+    covar_a       : (n_a, n_a) at k-1 post-update, ordered by a_ids.
+    covar_b       : (n_b, n_b) at k post-update (or pre-update), ordered by b_ids.
+    state_matrix  : Φ_{k-1}, (n_c, n_c), ordered by c_ids — the EKF state
+                    dim at propagation time, which may differ from a_ids if
+                    features were marginalised between t_a and propagation.
+    update_matrix : (I - K_k H_k), (n_b, n_b), ordered by b_ids. None pre-update.
+    a_ids, c_ids, b_ids : feature-id orderings at the three time points.
+
+    Returns (ΔT, Σ_Δξ).
     """
     delta_T = T_b @ T_a.inverse()
  
-    PhiPa = state_matrix @ covar_a              # (n_a, n_a)
- 
+    # Build S_ac: select a → c. (n_c, n_a). Core 18 dims always identity.
+    n_a = covar_a.shape[0]
+    n_c = state_matrix.shape[0]
+    S_ac = _select_matrix(a_ids, c_ids, n_a, n_c)
+    PhiPa_in_c = state_matrix @ S_ac @ covar_a    # (n_c, n_a)
+
     if update_matrix is None:
-        cross = PhiPa[:6, :6]                   # eq 183
+        cross = PhiPa_in_c[:6, :6]                # eq 183
     else:
-        assert a_ids is not None and b_ids is not None, \
-            "post-update path requires a_ids and b_ids"
-        rows = list(range(18))
-        for fid in b_ids:
-            i_a = a_ids.index(fid)
-            rows.extend([18 + 3*i_a + j for j in range(3)])
-        rows = jnp.asarray(rows)
-        PhiPa_sliced = PhiPa[rows, :]           # (n_b, n_a)
-        cross = (update_matrix @ PhiPa_sliced)[:6, :6]    # eq 187
- 
+        assert b_ids is not None, "post-update path requires b_ids"
+        # b_ids ⊆ c_ids (b is c post-update-and-marginalise/augment).
+        S_cb = _select_matrix(c_ids, b_ids, n_c, update_matrix.shape[0])  # (n_b, n_c)
+        cross = (update_matrix @ S_cb @ PhiPa_in_c)[:6, :6]                # eq 187
+
     Caa = covar_a[:6, :6]
     Cbb = covar_b[:6, :6]
     P_joint = jnp.block([[Caa,    cross.T],
                          [cross,  Cbb    ]])
- 
+
     Ad = T_a.adjoint()
-    J  = jnp.concatenate([-Ad, Ad], axis=1)     # (6, 12)
+    J  = jnp.concatenate([-Ad, Ad], axis=1)
     Sigma_DeltaXi = J @ P_joint @ J.T
-    Sigma_DeltaXi = 0.5 * (Sigma_DeltaXi + Sigma_DeltaXi.T)
+    Sigma_DeltaXi = make_psd(Sigma_DeltaXi) 
     return delta_T, Sigma_DeltaXi
+
+
+def _select_matrix(src_ids: list[int], dst_ids: list[int],
+                   n_src: int, n_dst: int) -> jnp.ndarray:
+    """(n_dst, n_src) selector. Core 18 always identity-to-identity.
+    Each fid in dst that exists in src maps that 3-block; missing fids
+    contribute zero rows (won't happen if dst ⊆ src)."""
+    S = jnp.zeros((n_dst, n_src))
+    S.at[:18, :18].set(jnp.eye(18))
+    for i_dst, fid in enumerate(dst_ids):
+        if fid not in src_ids:
+            continue
+        i_src = src_ids.index(fid)
+        S.at[18 + 3*i_dst:18 + 3*i_dst + 3, 18 + 3*i_src:18 + 3*i_src + 3].set(jnp.eye(3))
+    return S
  
 
 # =============================================================================

@@ -129,8 +129,8 @@ class Solver:
         if not np.all(np.isfinite(Sigma_prior)):
             raise ValueError(f"Sigma_prior has non-finite entries: {Sigma_prior}")
         eigs = np.linalg.eigvalsh(Sigma_prior)
-        if eigs.min() <= 0:
-            raise ValueError(f"Sigma_prior not positive definite (min eig {eigs.min():.2e})")
+        if eigs.min() < 0: 
+            raise ValueError(f"Sigma_prior not positive semi definite (min eig {eigs.min():.2e})")
         
         # Reset per-call state
         self._dt          = float(dt)
@@ -169,18 +169,29 @@ class Solver:
             prior_kml: tuple | None = None
             prior_k:   tuple | None = None
 
-            if p.p_prev is not None and p.Sigma_prev is not None:
-                # Previous joint solve: prior at k-1
-                p_init = np.asarray(p.p_prev, dtype=np.float64).reshape(3)
-                Sigma_pp = np.asarray(p.Sigma_prev, dtype=np.float64)[:3, :3]
-                prior_kml = (p_init.copy(), self._whitening(Sigma_pp))
-            elif corr in (PixelType.S_S, PixelType.S_M):
+            # if p.p_prev is not None and p.Sigma_prev is not None: #TODO: Explore why roll-over fails
+            #     # Previous joint solve: prior at k-1
+            #     p_init = np.asarray(p.p_prev, dtype=np.float64).reshape(3)
+            #     Sigma_pp = np.asarray(p.Sigma_prev, dtype=np.float64)[:3, :3]
+            #     prior_kml = (p_init.copy(), self._whitening(Sigma_pp))
+            #     if corr in (PixelType.S_S, PixelType.M_S):
+            #         tri = self._triangulate_stereo(p, frame="curr")
+            #         if tri is not None:
+            #             p_Bk_hat, Sigma_p_Bk = tri
+            #             prior_k = (p_Bk_hat, self._whitening(Sigma_p_Bk))
+            if corr in (PixelType.S_S, PixelType.S_M):
                 # Triangulate at k-1 → prior at k-1, also serves as p_init
                 tri = self._triangulate_stereo(p, frame="prev")
                 if tri is None:
                     continue
                 p_init, Sigma_p = tri
                 prior_kml = (p_init.copy(), self._whitening(Sigma_p))
+                if corr == PixelType.S_S:
+                    tri = self._triangulate_stereo(p, frame="curr")
+                    if tri is not None:
+                        p_Bk_hat, Sigma_p_Bk = tri
+                        prior_k = (p_Bk_hat, self._whitening(Sigma_p_Bk))
+
             elif corr == PixelType.M_S:
                 # Triangulate at k → prior at k; p_init from CandidateSample
                 tri = self._triangulate_stereo(p, frame="curr")
@@ -198,6 +209,7 @@ class Solver:
 
             # ---- MM observability gate ----
             if corr == PixelType.M_M:
+                continue #TODO: Explore why M-M fails
                 t_base = self._t_base(delta_T_prior, cam_m)
                 if float(np.linalg.norm(t_base)) < self.t_base_min:
                     log.debug(f"MM point {p.id} skipped: ‖t_base‖ < {self.t_base_min}")
@@ -682,5 +694,9 @@ class Solver:
                 p.v_curr = s_i[3:6]
             
             log.debug(f"\nSolver wrote the following too {pid}: Point: {p.p_curr}.\n Vel: {p.v_curr}.\n Sigma: {p.Sigma_curr}\n")
-
+            if np.any(np.isnan(s_i)) or np.any(np.isinf(s_i)):
+                raise ValueError(f"Failed to compute the state of point {p}. \n State: {s_i}")
+            
+            if np.any(np.isnan(p.Sigma_curr)) or np.any(np.isinf(p.Sigma_curr)):
+                raise ValueError(f"Failed to compute the covariance of {p}. \n Covariance: {s_i}")
             

@@ -15,7 +15,7 @@ Set membership defines role; points themselves are role-agnostic.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Iterator, Optional, Callable
 import cv2 as cv
@@ -82,6 +82,12 @@ class Point:
     # ---- identity --------------------------------------------------------
     id: int                                    # globally unique
     n: int = 0                                 # age in frames since birth
+   
+    # TODO: post-demo, set n_max at admission using alg["cv"]["n_max"] ± jitter.
+    # For now jitter is on the Point default to spread mass-marginalisation.
+    n_max: int = field(default_factory=lambda: int(
+        200 * (1.0 + 0.25 * (np.random.rand() * 2 - 1))
+    ))
 
     # ---- pixel observations (stereo, current and previous frame) ---------
     # cv.KeyPoint carries (pt, size, angle, response, octave, class_id).

@@ -228,11 +228,13 @@ class Algo:
         T_b = accum.EKF.state.T
         covar_a = accum.P_prev
         covar_b = accum.EKF.covariance
+        c_ids = accum.EKF.state.feature_ids.copy()
 
         delta_T, covar_delta_T = relative_pose(
             T_a, T_b
             ,covar_a, covar_b,
-            prop_state_matrix
+            prop_state_matrix,
+            a_ids=accum.X_prev.feature_ids, c_ids=c_ids
         )
 
         # ---- Search and track --------------------------------------------
@@ -281,7 +283,7 @@ class Algo:
             T_a, T_b
             ,covar_a, covar_b,
             prop_state_matrix, upd_state_matrix,
-            accum.X_prev.feature_ids, accum.EKF.state.feature_ids
+            accum.X_prev.feature_ids, c_ids, accum.EKF.state.feature_ids
         )
 
 
@@ -493,8 +495,8 @@ class Algo:
         N_F_max = self.alg["cv"]["N_F_max"]
         lifespan_max = self.alg["cv"]["n_max"]
 
-        hits_limit = lambda p: p.n + 1 == lifespan_max
-        hit_limit = lambda p: p.n == lifespan_max
+        hits_limit = lambda p: p.n_max + 1 == lifespan_max
+        hit_limit = lambda p: p.n_max == lifespan_max
 
         I_hits_limit = self.accum.I.filter(hits_limit) 
         F_hits_limit = self.accum.F.filter(hits_limit)
@@ -513,10 +515,10 @@ class Algo:
 
         log.debug(f"Max Interest points: {N_I_max}. Number of interest points: {N_I}. Interest points ending this frame: {I_ign}. Interest points ending next frame: {I_pre_empt}")
         _log_pixel_type_counts("Interest", self.accum.I)
-        log.info(f"Max Feature points: {N_F_max}. Number of feature points: {N_F}. Feature points ending this frame: {F_ign}. Feature points ending next frame: {F_pre_empt}")
+        log.debug(f"Max Feature points: {N_F_max}. Number of feature points: {N_F}. Feature points ending this frame: {F_ign}. Feature points ending next frame: {F_pre_empt}")
         _log_pixel_type_counts("Features", self.accum.F) 
 
-        log.info(f"Interest points to replenish: {N_I_repl}, Feature points to replenish: {N_F_repl}")
+        log.debug(f"Interest points to replenish: {N_I_repl}, Feature points to replenish: {N_F_repl}")
         
         if focus_changed:
             raise NotImplementedError("focus change handling not yet implemented")
