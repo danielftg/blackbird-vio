@@ -1,0 +1,22 @@
+defaults:
+  - algorithm: default
+  - calibration: default
+  - bag: indoor_loadless_hover
+  - _self_
+
+data_dir: output   # root for all output; bag/run subdirs are appended automatically
+fetch_vid: false
+evaluate: false
+profile: false     # cProfile the estimator loop; saves profile.prof + profile.txt
+limit: null        # int or null — last frame index (exclusive)
+offset: null       # int or null — first frame index; use to skip takeoff transients
+max_images: null   # int or null — cap images exported per camera (debugging only)
+
+hydra:
+  run:
+    dir: ${data_dir}/${bag.name}/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: ${data_dir}/${bag.name}
+    subdir: ${now:%Y-%m-%d_%H-%M-%S}
+  job:
+    chdir: false   # keep CWD as src/; all file paths derived via __file__
