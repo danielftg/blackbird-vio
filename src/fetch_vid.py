@@ -17,6 +17,7 @@ Output is written to:
 """
 
 import argparse
+import logging 
 from pathlib import Path
 
 import cv2
@@ -40,7 +41,7 @@ from modules.bag_loader import (
 
 REPO_ROOT = Path(__file__).resolve().parent
 BAGS_DIR = REPO_ROOT / "bags"
-
+log = logging.getLogger(__name__)
 
 def interpolate_to_camera_times(
     data_times: np.ndarray,
@@ -166,8 +167,8 @@ def export_csv_data(bag_path: Path, output_dir: Path, calib: dict) -> None:
     aligned_motor.to_csv(output_dir / "motor_data.csv", index=False)
     aligned_pose.to_csv(output_dir / "body_pose.csv",   index=False)
 
-    print(f"Saved {output_dir / 'motor_data.csv'}")
-    print(f"Saved {output_dir / 'body_pose.csv'}")
+    log.info(f"Saved {output_dir / 'motor_data.csv'}")
+    log.info(f"Saved {output_dir / 'body_pose.csv'}")
 
 
 def export_images(
@@ -181,30 +182,30 @@ def export_images(
     left_dir.mkdir(parents=True, exist_ok=True)
     right_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Saving left images...")
+    log.info("Saving left images...")
     for index, (timestamp_ns, image) in enumerate(iter_left_images(bag_path)):
         if max_images is not None and index >= max_images:
             break
         save_image(left_dir / f"left_{index:06d}_{timestamp_ns}.png", image)
 
-    print("Saving right images...")
+    log.info("Saving right images...")
     for index, (timestamp_ns, image) in enumerate(iter_right_images(bag_path)):
         if max_images is not None and index >= max_images:
             break
         save_image(right_dir / f"right_{index:06d}_{timestamp_ns}.png", image)
 
-    print(f"Saved images under {image_dir}")
+    log.info(f"Saved images under {image_dir}")
 
 
 def run(cfg, bag_path: Path, data_dir: Path, calib: dict) -> None:
     """Called by main.py when cfg.fetch_vid is true."""
     data_dir.mkdir(parents=True, exist_ok=True)
-    print(f"\nPreprocessing bag: {bag_path.name}")
-    print(f"Output dir:        {data_dir}\n")
+    log.info(f"\nPreprocessing bag: {bag_path.name}")
+    log.info(f"Output dir:        {data_dir}\n")
     export_csv_data(bag_path, data_dir, calib)
-    print("\nExporting images...")
+    log.info("\nExporting images...")
     export_images(bag_path, data_dir / "images", max_images=cfg.max_images)
-    print("Preprocessing done.\n")
+    log.info("Preprocessing done.\n")
 
 
 def main() -> None:
@@ -218,8 +219,8 @@ def main() -> None:
         BAGS_DIR / args.bag if args.bag else None,
         bags_dir=BAGS_DIR,
     )
-    print(f"Using bag: {bag_path}")
-    print("\nTopics:")
+    log.info(f"Using bag: {bag_path}")
+    log.info("\nTopics:")
     list_topics(bag_path)
 
     # Load calibration directly when running standalone
@@ -230,13 +231,13 @@ def main() -> None:
     data_dir = REPO_ROOT / "output" / bag_path.stem.split(".")[0]
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    print("\nExporting CSV data...")
+    log.info("\nExporting CSV data...")
     export_csv_data(bag_path, data_dir, calib)
 
-    print("\nExporting images...")
+    log.info("\nExporting images...")
     export_images(bag_path, data_dir / "images")
 
-    print("\nDone.")
+    log.info("\nDone.")
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ from typing import Generator
 
 import numpy as np
 import pandas as pd
+import logging
 from rosbags.highlevel import AnyReader
 from rosbags.typesys import Stores, get_typestore
 
@@ -27,6 +28,7 @@ from rosbags.typesys import Stores, get_typestore
 # ---------------------------------------------------------------------------
 # Dataset topic names
 # ---------------------------------------------------------------------------
+log = logging.getLogger(__name__)
 
 LEFT_IMAGE_TOPIC = "/camera/infra1/image_rect_raw"
 RIGHT_IMAGE_TOPIC = "/camera/infra2/image_rect_raw"
@@ -111,7 +113,7 @@ def list_topics(bag_path: str | Path | None = None) -> None:
 
     with AnyReader([bag_path], default_typestore=TYPESTORE) as reader:
         for connection in reader.connections:
-            print(connection.topic, "--", connection.msgtype)
+            log.info(connection.topic, "--", connection.msgtype)
 
 
 def read_topic(topic: str, bag_path: str | Path | None = None) -> list[tuple[int, object]]:
