@@ -17,7 +17,7 @@ os.environ["OPENBLAS_NUM_THREADS"] = N
 os.environ["MKL_NUM_THREADS"]      = N
 os.environ["NUMEXPR_NUM_THREADS"]  = N
 os.environ["VECLIB_MAXIMUM_THREADS"] = N
-os.environ["XLA_FLAGS"] = "--xla_cpu_multi_thread_eigen=true intra_op_parallelism_threads=4"
+os.environ["XLA_FLAGS"] = f"--xla_cpu_multi_thread_eigen=true intra_op_parallelism_threads={N}"
 
 import argparse
 from pathlib import Path
@@ -74,8 +74,8 @@ def main() -> None:
         fetch_vid.main()
 
     # ---- load config ---------------------------------------------------
-    alg = util.load_yaml("constants/algorithm.yaml")
-    calib = util.load_yaml("constants/calibration.yaml")
+    alg = util.load_yaml("conf/algorithm.yaml")
+    calib = util.load_yaml("conf/calibration.yaml")
     
     # ---- load preprocessed data -----------------------------------------
     motor = pd.read_csv(args.data / "motor_data.csv")

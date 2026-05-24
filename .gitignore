@@ -267,3 +267,8 @@ bags/*
 
 # Ignore bag files anywhere
 *.bag
+
+paper/
+.claude/
+CLAUDE.md
+*.prof
