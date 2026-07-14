@@ -1,9 +1,27 @@
 # blackbird-vio
 
-Vision-only body-frame state estimator for quadcopters. Stereo cameras, no IMU.
-See `paper.pdf` for details. *(link tbd)*
+**Work in progress.** We're building a tactical search-and-pursuit drone — short-to-medium
+range, low/medium altitude relative to the ground surface, indoor or outdoor, needing
+nothing more than a free flight corridor. It doesn't interact with its environment
+(can't open a door, land somewhere non-trivial, etc.). This repo is the current stage
+of that build; what "current" specifically means keeps changing — the full picture is
+in [journal/paper/main.pdf](journal/paper/main.pdf).
 
-## Setup
+## Map of this repo
+
+```
+blackbird-vio/
+├── src/       the running code — whatever's currently built
+└── journal/   the research behind it
+    ├── notes/   reasoning, research, evaluation — worked out first
+    └── paper/   the formal write-up of the current state of src/ — written second
+```
+
+Order of motion: an idea gets worked out in `notes/`, written up formally in `paper/`,
+then `src/` is built or changed to match `paper/`. When something changes about how
+`src/` works, `paper/` changes first.
+
+## Getting started
 
 ```bash
 python -m venv venv
@@ -11,14 +29,16 @@ source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Download a flight bag (e.g. `indoor_loadless_hovor_3096.1g_79.04s.bag`) from
-the [ZJU FAST-Lab VID-Dataset](https://github.com/ZJU-FAST-Lab/VID-Dataset)
-and place it under `src/bags/`.
+Then see **[src/README.md](src/README.md)** for what's currently in `src/` and how to run it.
 
-## Run
+## Going deeper
 
-```bash
-python src/main.py --fetch_vid --evaluate
-```
+| Question | Where |
+|---|---|
+| What's actually in `src/` right now, and how do I run it? | [src/README.md](src/README.md) |
+| What are we building, and why this way? | [journal/README.md](journal/README.md) |
+| What's the current formal write-up? | [journal/paper/main.pdf](journal/paper/main.pdf) |
 
-Results appear in `src/output/`.
+## License
+
+MIT — see [LICENSE](LICENSE).

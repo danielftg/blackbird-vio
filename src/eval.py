@@ -58,7 +58,7 @@ def _plot_state_diagnostics(results: pd.DataFrame, output_path: Path) -> None:
     ax.legend(ncol=3, fontsize=9); ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
+    plt.savefig(output_path)
     plt.close()
 
 def _plot_trajectory(merged: pd.DataFrame, output_path: Path) -> None:
@@ -118,7 +118,7 @@ def _plot_trajectory(merged: pd.DataFrame, output_path: Path) -> None:
     ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
+    plt.savefig(output_path)
     plt.close()
 
 
@@ -154,7 +154,7 @@ def evaluate(results_path: Path,
           No conversion needed before comparison.
     """
     log.info(f"Loading results from {results_path}")
-    results = pd.read_csv(results_path)
+    results = pd.read_csv(results_path).iloc[:]
     
     log.info(f"Loading ground truth from {ground_truth_path}")
     gt = pd.read_csv(ground_truth_path)
@@ -332,17 +332,17 @@ def evaluate(results_path: Path,
     
     plt.tight_layout()
     
-    plot_path = results_path.parent / f"{results_path.stem}_errors.png"
-    plt.savefig(plot_path, dpi=150)
+    plot_path = results_path.parent / f"{results_path.stem}_errors.svg"
+    plt.savefig(plot_path)
     log.info(f"Saved plot to {plot_path}")
     plt.close()
     
-    traj_path = results_path.parent / f"{results_path.stem}_trajectory.png"
+    traj_path = results_path.parent / f"{results_path.stem}_trajectory.svg"
     _plot_trajectory(merged, traj_path)
     log.info(f"Saved trajectory plot to {traj_path}")
     
 
-    diag_path = results_path.parent / f"{results_path.stem}_diagnostics.png"
+    diag_path = results_path.parent / f"{results_path.stem}_diagnostics.svg"
     _plot_state_diagnostics(results, diag_path)
     log.info(f"Saved diagnostics plot to {diag_path}")
     

@@ -1,0 +1,42 @@
+### Single-image formation — the digital image and what it encodes
+
+The [[02-image-formation#Image formation|rendering equation]] fixes the light leaving the scene and the [[03-projective-geometry#Central projection (perspective/pinhole camera model)|central projection]] fixes its geometry. This section carries both to the datum we actually compute on — the discrete $W\times H\times C$ image array $\mathbf{I}$ — and asks what of the $3$D world that array encodes and what it destroys.
+
+#### What a pixel is
+Light from a source (chiefly the sun, across a spectrum) reflects off the visible boundary $\partial B^*$ — modulated by the surface's opacity, reflectance and texture — and the fraction sent toward the camera centre is refracted by the lens onto a discrete CMOS sensor. The full sensing chain is [[sze-cv#Image sensing pipeline — the light→image chain (§2.3, Fig. 2.23, printed p.80)|optics → aperture → shutter → sensor → gain → ADC → demosaic → white-balance → gamma → compression]] ([[sze-cv#Image sensing pipeline — the light→image chain (§2.3, Fig. 2.23, printed p.80)|Szeliski, Fig. 2.23]]), ending in the $W\times H\times C$ array $\mathbf{I}$ ($C=1$ grayscale, $C=3$ RGB). The bridge from scene radiance to what the sensor collects is the **fundamental radiometric relation** $E = L\,\tfrac{\pi}{4}(d/f)^2\cos^4\alpha$ ([[sze-cv#Fundamental radiometric relation — scene radiance → sensor irradiance (§2.2.3, printed p.79)|Szeliski, eq. 2.102]]): aperture diameter $d$, focal length $f$, and $\cos^4\alpha$ the off-axis vignetting fall-off.
+
+Each scalar of $\mathbf{I}$ originates as the scene **radiance** $L$ along that pixel's ray — the $I$ of the rendering equation — but is not recorded faithfully. Three lossy maps stand between radiance and the stored value:
+- **spectral collapse** — each channel is a weighted integral of the spectrum against the sensor's spectral sensitivity, $R=\int L(\lambda)\,S_R(\lambda)\,d\lambda$ ([[sze-cv#Color — the scalar is a spectral integral against sensor sensitivity (§2.3.2, printed p.92)|Szeliski, eq. 2.110]]); grayscale is a luminance-weighted combination — in practice the gamma-encoded [[sze-cv#Luminance vs luma, and metamerism (§2.3.2, printed p.89-90, 97)|*luma*]], not the linear photometric luminance, and not a flat average across wavelengths;
+- **gamma** — a nonlinear recode $Y'=Y^{1/\gamma}$ with $\gamma\approx 2.2$ ([[sze-cv#Gamma — the stored scalar is not linear radiance (§2.3.2, printed p.94-95)|Szeliski §2.3.2]]), which protects shadow detail but makes the value nonlinear in radiance;
+- **quantization** — the ADC turns the analog reading into a finite-precision integer.
+
+So the stored scalar — the image **intensity** — is a spectrally-collapsed, gamma-mapped, quantized function of $L$, *not the radiance itself*; radiometric reasoning is valid only in the linear radiance space the array has left.
+
+**Brightness constancy.** The rendering equation makes radiance depend on geometry, illumination and reflectance jointly. Under the Lambertian reduction (view-independent radiance) a surface point keeps the same radiance in every direction, so its image value is unchanged as the camera moves: $I(\mathbf{x}(t),t)=\text{const}$ along its track — the **brightness-constancy constraint** ([[sze-cv#Brightness constancy & Lucas-Kanade (§9.1, printed p.557-558)|Szeliski §9.1]], after Horn 1974). This is the assumption optical-flow tracking (Lucas–Kanade) rests on; it fails wherever one term of the rendering equation breaks the reduction — specularity ($\rho$ view-dependent), shadow ($\epsilon$/illumination), translucency (the opaque/non-participating-medium assumption), occlusion boundary ($g$ visibility flips, no correspondence) — the same four mechanisms as the edge taxonomy below ([[kajiya-rendeq#Brightness-constancy failures = one violated term each|Kajiya, term-by-term]]).
+
+#### Image edges
+An **edge** is a locus of high image gradient. Finite differences on $\mathbf{I}$ give the partials $I_x,I_y$, and from them the gradient magnitude $\lVert\nabla I\rVert$ and direction; in practice a smoothed operator such as **Sobel** is used — a central difference of a binomially-smoothed image (Derivative of Gaussian), $[1\;2\;1]^\top[-1\;0\;1]$ — the smoothing, not the integer mask, is what departs from a pure finite difference; the unnormalised integer form is chosen for cheap convolution ([[sze-cv#Sobel — a separable, integer, smoothed difference (§3.2.2, Fig. 3.14, printed p.125)|Szeliski, Fig. 3.14]]; edge strength = gradient maximum, thinned to edgels, [[sze-cv#Edge detection — gradient of the smoothed image, thinned to maxima (§7.2.1, printed p.457)|§7.2.1]]).
+
+The gradient classifies a local patch into three kinds (the structure-tensor / corner-detection criterion):
+- **flat** — both $I_x$ and $I_y$ small: no localizable structure;
+- **edge** — gradient large in one direction only (high $I_x$ *or* $I_y$, equivalently high $\lVert\nabla I\rVert$): position is pinned *across* the edge but not *along* it — the **aperture problem**;
+- **corner** — gradient large in two independent directions (high $I_x$ *and* $I_y$): position pinned in both image directions.
+
+Only the corner anchors a patch fully, which is why corners drive matching; an edge constrains only its normal direction, so a match along a fixed search line needs gradient *across* that line — the reason a stereo match on a horizontal scanline requires high $I_x$ (next section).
+
+An apparent contour $\gamma$ is an edge, but the converse fails. The gradient marks a discontinuity of the radiance field, and such discontinuities have **four physical origins** — occluding contour (depth), crease (surface normal), surface marking (reflectance), and shadow (illumination) ([[barrow_rec_intrinsic#Edge taxonomy|Barrow & Tenenbaum, 1978]]; [[marr-vision#Four origins of image contours (book p.215, §3.6)|Marr, 1982]]). A single image cannot tell them apart: **edges are a superset of apparent contours**, and separating the four is an inverse problem it cannot close.
+
+#### The perspective camera model
+We extend the [[03-projective-geometry#Central projection (perspective/pinhole camera model)|central projection]] to the full **perspective camera model**: the ideal pinhole composed with the pixel mapping carried by the **calibration matrix** $K=\begin{bmatrix}f_x&s&c_x\\0&f_y&c_y\\0&0&1\end{bmatrix}$ ([[sze-cv#Camera intrinsics — the calibration matrix K (§2.1, printed p.55-57)|Szeliski, eq. 2.57]]), giving the camera matrix $P=K[R\mid t]$ — intrinsics $K$, extrinsics $[R\mid t]$. Real lenses deviate from the pinhole through **radial distortion**, which bends the images of straight lines ([[sze-cv#Lens distortions — the linear model and its deviation (§2.1.5, printed p.63)|Szeliski §2.1.5]]); modelling it lets the pinhole apply to a real camera. We assume henceforth that $K$ and the distortion are calibrated and the camera centre is known.
+
+#### What a single image preserves and destroys
+Central projection keeps the pencil of rays through the camera centre $c$ and forgets distance along each. The one metric quantity preserved is therefore **bearing**: every pixel back-projects to a known ray, fixing the direction to each visible point while discarding its range. The remaining invariants follow from preserving that pencil:
+- **collinearity** — straight world lines image to straight lines (the linear projection model; [[sze-cv#Lens distortions — the linear model and its deviation (§2.1.5, printed p.63)|Szeliski §2.1.5]]);
+- the **cross-ratio** of collinear points ([[hartley-mulview-geom#Conics & cross-ratio (book p.30, p.44, §2)|Hartley & Zisserman, 2004]]);
+- **tangency** — a ray tangent to $\partial B^\infty$ images to the apparent contour $\gamma$ ([[cip-vis-mot#Contour generator and apparent contour (paper p.1106)|Cipolla & Giblin]]);
+- **orientation,** — three points form a triangle with a orientation in space. The orientation of this triangle is preserved in the image. ([[contesse#Orientation under projection (§2)|Contesse, §2]]).
+
+Destroyed or confounded: **depth/range** (the ray collapses — the loss the two-image configuration below exists to recover); absolute **scale**; Euclidean **length, angle, area and parallelism**; the **occluded surface** behind the nearest one along each ray, its depth order recoverable only at T-junctions; the full **spectrum**, collapsed to $C$ channels; and **absolute radiance**, confounded with geometry, illumination and reflectance inside a single gamma-mapped integer.
+
+---
+

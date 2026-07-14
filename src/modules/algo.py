@@ -128,6 +128,7 @@ class Algo:
         key_L = detect_keypoints(L_0, calib, alg)
         key_R = detect_keypoints(R_0, calib, alg)
 
+        #TODO: - Amend transport of F_init to B_k before calling focus_select_interest.
         I_L = focus_select_interest(key_L, F_init, sigma_F_init, accum.I, calib, alg, "L")
         I_R = focus_select_interest(key_R, F_init, sigma_F_init, accum.I, calib, alg, "R")
         
