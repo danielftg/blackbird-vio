@@ -225,6 +225,9 @@ poetry.toml
 # LSP config files
 pyrightconfig.json
 
+# VSCode
+.vscode/
+
 ### Windows ###
 # Windows thumbnail cache files
 Thumbs.db
@@ -268,7 +271,20 @@ bags/*
 # Ignore bag files anywhere
 *.bag
 
-paper/
 .claude/
 CLAUDE.md
-*.prof
+
+
+# journal/ — private by default; only the curated public subset is tracked
+journal/*
+!journal/paper/
+!journal/notes/
+
+journal/paper/*
+!journal/paper/main.pdf
+!journal/paper/.latexmkrc
+
+journal/notes/*
+!journal/notes/theory/
+!journal/notes/architectures/
+!journal/notes/modules/
