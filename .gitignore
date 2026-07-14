@@ -277,6 +277,7 @@ CLAUDE.md
 
 # journal/ — private by default; only the curated public subset is tracked
 journal/*
+!journal/README.md
 !journal/paper/
 !journal/notes/
 
